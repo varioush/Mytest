@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dynamic Timer Alarm with Sound</title>
+    <style>
+        body {
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            font-family: Arial, sans-serif;
+        }
+        #alarmMessage {
+            font-size: 24px;
+            color: red;
+            margin-bottom: 20px;
+        }
+        #timer {
+            font-size: 20px;
+            color: green;
+            margin-bottom: 20px;
+        }
+        input {
+            padding: 5px;
+            font-size: 16px;
+        }
+        button {
+            padding: 10px;
+            font-size: 16px;
+            margin-top: 10px;
+        }
+    </style>
+</head>
+<body>
+    <div>
+        <label for="timeInput">Set timer (seconds):</label>
+        <input type="number" id="timeInput" value="60" min="1">
+        <button onclick="startAlarm()">Start Timer</button>
+    </div>
+
+    <div id="alarmMessage">Waiting for alarm...</div>
+    <div id="timer">Next alarm in: 60 seconds</div>
+
+    <!-- Audio element to play the alarm sound -->
+    <audio id="alarmSound" src="https://assets.mixkit.co/active_storage/sfx/221/221.wav" preload="auto"></audio>
+
+    <script>
+        let interval;
+        let timeLeft;
+        let userTime;
+
+        function triggerAlarm() {
+            const messageElement = document.getElementById("alarmMessage");
+            const alarmSound = document.getElementById("alarmSound");
+
+            messageElement.textContent = "Alarm! Time's up.";
+            alarmSound.play(); // Play the sound
+
+            // Reset the message after a short time
+            setTimeout(() => {
+                messageElement.textContent = "Waiting for alarm...";
+            }, 5000);
+
+            // Reset the timer
+            timeLeft = userTime;
+        }
+
+        function updateTimer() {
+            const timerElement = document.getElementById("timer");
+            timeLeft--;
+
+            if (timeLeft >= 0) {
+                timerElement.textContent = `Next alarm in: ${timeLeft} seconds`;
+            } else {
+                clearInterval(interval); // Stop the countdown after it finishes
+            }
+        }
+
+        function startAlarm() {
+            // Clear any previous interval
+            clearInterval(interval);
+
+            // Get the user's time input
+            userTime = parseInt(document.getElementById("timeInput").value);
+            timeLeft = userTime;
+
+            // Update the timer immediately
+            updateTimer();
+
+            // Trigger the alarm at the end of the user-defined time
+            setTimeout(triggerAlarm, userTime * 1000);
+
+            // Update the countdown every second
+            interval = setInterval(updateTimer, 1000);
+        }
+    </script>
+</body>
+</html>
