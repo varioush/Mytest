@@ -1,0 +1,121 @@
+package com.example.kafka.service;
+
+import io.confluent.kafka.schemaregistry.client.CachedSchemaRegistryClient;
+import io.confluent.kafka.schemaregistry.client.SchemaRegistryClient;
+import org.apache.avro.Schema;
+import org.springframework.scheduling.annotation.Scheduled;
+import org.springframework.stereotype.Service;
+
+import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
+
+@Service
+public class MultiUrlSchemaRegistryService {
+
+    private final ConcurrentMap<String, SchemaRegistryClient> registryClients = new ConcurrentHashMap<>();
+    private final ConcurrentMap<String, Schema> schemaCache = new ConcurrentHashMap<>();
+    private final Set<SchemaCacheKey> cachedSchemas = Collections.synchronizedSet(new HashSet<>());
+
+    /**
+     * Cache key to track subjects and Schema Registry URLs.
+     */
+    private static class SchemaCacheKey {
+        private final List<String> schemaRegistryUrls;
+        private final String subject;
+
+        public SchemaCacheKey(List<String> schemaRegistryUrls, String subject) {
+            this.schemaRegistryUrls = schemaRegistryUrls;
+            this.subject = subject;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) return true;
+            if (o == null || getClass() != o.getClass()) return false;
+            SchemaCacheKey that = (SchemaCacheKey) o;
+            return Objects.equals(schemaRegistryUrls, that.schemaRegistryUrls) &&
+                   Objects.equals(subject, that.subject);
+        }
+
+        @Override
+        public int hashCode() {
+            return Objects.hash(schemaRegistryUrls, subject);
+        }
+    }
+
+    /**
+     * Attempt to create a SchemaRegistryClient for the first accessible Schema Registry URL.
+     */
+    private SchemaRegistryClient getSchemaRegistryClient(List<String> schemaRegistryUrls) {
+        for (String url : schemaRegistryUrls) {
+            try {
+                SchemaRegistryClient client = new CachedSchemaRegistryClient(url, 100);
+                client.getAllSubjects(); // Test connection
+                return client;
+            } catch (Exception e) {
+                // Log failure and try next URL
+            }
+        }
+        throw new RuntimeException("All Schema Registry URLs are unreachable.");
+    }
+
+    /**
+     * Fetch and cache schema by subject and version.
+     */
+    public Schema getSchema(List<String> schemaRegistryUrls, String subject, int version) throws Exception {
+        String cacheKey = String.join(",", schemaRegistryUrls) + "|" + subject + ":" + version;
+        if (schemaCache.containsKey(cacheKey)) {
+            return schemaCache.get(cacheKey);
+        }
+
+        SchemaRegistryClient client = getSchemaRegistryClient(schemaRegistryUrls);
+        Schema schema = new Schema.Parser().parse(client.getSchemaMetadata(subject, version).getSchema());
+        schemaCache.put(cacheKey, schema);
+
+        return schema;
+    }
+
+    /**
+     * Fetch and cache the latest schema for a subject.
+     */
+    public Schema getLatestSchema(List<String> schemaRegistryUrls, String subject) throws Exception {
+        String cacheKey = String.join(",", schemaRegistryUrls) + "|" + subject + ":latest";
+        if (schemaCache.containsKey(cacheKey)) {
+            return schemaCache.get(cacheKey);
+        }
+
+        SchemaRegistryClient client = getSchemaRegistryClient(schemaRegistryUrls);
+        Schema schema = new Schema.Parser().parse(client.getLatestSchemaMetadata(subject).getSchema());
+        schemaCache.put(cacheKey, schema);
+
+        // Track the cached schema for periodic refresh
+        cachedSchemas.add(new SchemaCacheKey(schemaRegistryUrls, subject));
+
+        return schema;
+    }
+
+    /**
+     * Scheduled task to refresh all cached schemas.
+     */
+    @Scheduled(fixedRate = 60000) // Refresh every 60 seconds
+    public void refreshCache() {
+        for (SchemaCacheKey cacheKey : cachedSchemas) {
+            try {
+                List<String> urls = cacheKey.schemaRegistryUrls;
+                String subject = cacheKey.subject;
+
+                SchemaRegistryClient client = getSchemaRegistryClient(urls);
+                Schema schema = new Schema.Parser().parse(client.getLatestSchemaMetadata(subject).getSchema());
+
+                // Update the cache
+                String latestCacheKey = String.join(",", urls) + "|" + subject + ":latest";
+                schemaCache.put(latestCacheKey, schema);
+
+                System.out.println("Refreshed schema cache for subject: " + subject);
+            } catch (Exception e) {
+                System.err.println("Failed to refresh schema for subject: " + cacheKey.subject);
+            }
+        }
+    }
+}
