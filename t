@@ -1,7 +1,7 @@
 import csv
 
 # Constants
-MAX_QUERY_LENGTH = 8000  # Limit for each query
+MAX_OR_CONDITIONS = 96  # Maximum number of OR conditions per query
 TABLE_NAME = "YourTableName"  # DynamoDB table name
 STATUS_CONDITION = "STATUS='COMPLETED'"  # Condition for each eventid
 
@@ -20,17 +20,19 @@ def generate_queries_from_csv(csv_file_path):
     # Generate queries
     queries = []
     current_query = f"DELETE FROM {TABLE_NAME} WHERE "
-    current_length = len(current_query)
+    or_count = 0  # Track number of OR conditions in the current query
 
     for event_id in unique_event_ids:
         condition = f"(EVENTID = '{event_id}' AND {STATUS_CONDITION})"
-        if current_length + len(condition) + 4 > MAX_QUERY_LENGTH:  # 4 accounts for " OR "
+        if or_count >= MAX_OR_CONDITIONS:
+            # Add the completed query to the list
             queries.append(current_query.rstrip(" OR "))
+            # Start a new query
             current_query = f"DELETE FROM {TABLE_NAME} WHERE {condition} OR "
-            current_length = len(current_query)
+            or_count = 1
         else:
             current_query += f"{condition} OR "
-            current_length += len(condition) + 4
+            or_count += 1
 
     # Add the last query if there are remaining conditions
     if current_query.strip():
