@@ -1,0 +1,178 @@
+To adjust the logic so that **all validation groups must pass** and **at least one validation inside each group must pass**, we need to:
+
+1. Update the **YAML structure** to clearly separate validation groups.
+2. Refactor the **`RuleExecutor`** class to ensure:
+   - **All validation groups must pass.**
+   - **At least one validation within each group must pass.**
+
+---
+
+### **Updated YAML Example (Grouped Validations)**:
+```yaml
+tables:
+  - name: "user_table"
+    columns:
+      - name: "userid"
+        type: "string"
+      - name: "password"
+        type: "string"
+        secure: true
+      - name: "deviceid"
+        type: "string"
+      - name: "firsttimelogin"
+        type: "boolean"
+      - name: "termandcondition"
+        type: "boolean"
+      - name: "pushnotificationenabled"
+        type: "boolean"
+
+    data:
+      - userid: "bankuser"
+        password: "v1sWejjIQ8UYCAvGI7Yjuw=="
+        deviceid: "1a9c47c9-4776-4416-8458-a3c746fa130e"
+        firsttimelogin: true
+        pushnotificationenabled: true
+        termandcondition: true
+
+    rules:
+      - action: "validateLogin"
+        validationGroups:
+          - group:
+              - name: "checkLoginWithPassword"
+                type: "query"
+                query: "SELECT COUNT(*) FROM user_table WHERE userid = :userid AND password = :password"
+                expectedResult: "1"
+                error:
+                  statusCode: 401
+                  message: "Invalid username or password."
+
+          - group:
+              - name: "checkLoginWithoutPassword"
+                type: "query"
+                query: "SELECT COUNT(*) FROM user_table WHERE userid = :userid AND firsttimelogin = false"
+                expectedResult: "1"
+                error:
+                  statusCode: 400
+                  message: "User must provide a password on first-time login."
+
+        executionQuery:
+          query: |
+            SELECT userid, deviceid, firsttimelogin, termandcondition, pushnotificationenabled
+            FROM user_table 
+            WHERE userid = :userid 
+              AND (
+                (:password IS NOT NULL AND password = :password) OR 
+                (:password IS NULL AND firsttimelogin = false)
+              )
+          successMessage: "Login successful."
+          errorMessage: "Login failed due to unexpected error."
+```
+
+---
+
+### **Updated Rule Executor Code:**
+```java
+package com.example.micko.rule;
+
+import com.example.micko.data.DatabaseService;
+import org.springframework.http.ResponseEntity;
+import org.springframework.stereotype.Service;
+
+import java.util.List;
+import java.util.Map;
+
+@Service
+public class RuleExecutor {
+
+    private final DatabaseService dbService;
+
+    public RuleExecutor(DatabaseService dbService) {
+        this.dbService = dbService;
+    }
+
+    /**
+     * Execute a Rule from YAML
+     */
+    public ResponseEntity<Object> execute(Map<String, Object> rule, Map<String, Object> inputs) {
+
+        if (rule.containsKey("validationGroups")) {
+            List<Map<String, Object>> validationGroups = (List<Map<String, Object>>) rule.get("validationGroups");
+
+            // Ensure ALL validation groups pass
+            boolean allGroupsPassed = validationGroups.stream()
+                .allMatch(group -> validateGroup((List<Map<String, Object>>) group.get("group"), inputs));
+
+            if (!allGroupsPassed) {
+                return ResponseEntity.status(401).body("Validation failed. Check your inputs.");
+            }
+        }
+
+        // Execute the Rule Action
+        if (rule.containsKey("executionQuery")) {
+            Map<String, Object> executionQuery = (Map<String, Object>) rule.get("executionQuery");
+
+            String query = (String) executionQuery.get("query");
+            String successMessage = (String) executionQuery.getOrDefault("successMessage", "Operation successful.");
+            String errorMessage = (String) executionQuery.getOrDefault("errorMessage", "Operation failed.");
+
+            List<Map<String, Object>> result = dbService.executeSelectQuery(query, inputs);
+
+            if (result.isEmpty()) {
+                return ResponseEntity.status(401).body(errorMessage);
+            }
+
+            return ResponseEntity.ok(Map.of("message", successMessage, "data", result));
+        }
+
+        return ResponseEntity.status(501).body("Action not implemented.");
+    }
+
+    /**
+     * Validate an Entire Group of Validations
+     */
+    private boolean validateGroup(List<Map<String, Object>> validations, Map<String, Object> inputs) {
+        // At least one validation in the group must pass
+        return validations.stream().anyMatch(validationData -> evaluateValidation(mapToValidation(validationData), inputs));
+    }
+
+    /**
+     * Evaluate Individual Validation
+     */
+    private boolean evaluateValidation(Validation validation, Map<String, Object> inputs) {
+        String query = validation.getQuery();
+        String expectedResult = validation.getExpectedResult();
+
+        List<Map<String, Object>> results = dbService.executeSelectQuery(query, inputs);
+
+        return results.stream()
+                .anyMatch(result -> result.values().stream()
+                        .map(Object::toString)
+                        .anyMatch(value -> value.equalsIgnoreCase(expectedResult))
+                );
+    }
+
+    /**
+     * Map to Validation Object
+     */
+    private Validation mapToValidation(Map<String, Object> validationData) {
+        Validation validation = new Validation();
+        validation.setType((String) validationData.get("type"));
+        validation.setQuery((String) validationData.get("query"));
+        validation.setExpectedResult((String) validationData.get("expectedResult"));
+        validation.setError((Map<String, Object>) validationData.get("error"));
+        return validation;
+    }
+}
+```
+
+---
+
+### **How This Works:**
+- **All Groups Must Pass:** Every validation group must pass.
+- **At Least One Validation:** If **at least one validation** inside a **group passes**, that group passes.
+- **Failing Cases:** If **no validation** passes in **any group**, the entire request fails with the appropriate message.
+- **Success:** If **all groups** pass, the query is executed, and the result is returned.
+
+---
+
+Let me know if this works for you! 🚀
