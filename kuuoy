@@ -1,0 +1,44 @@
+import java.util.ArrayList;
+import java.util.List;
+import java.util.function.Function;
+
+public class TaskExecutor<I, O> {
+    private final I originalInput;
+    private Object output;
+    private final List<Function<?, ?>> tasks = new ArrayList<>();
+    
+    public TaskExecutor(I input) {
+        this.originalInput = input;
+        this.output = input;
+    }
+    
+    public <T, R> TaskExecutor<I, O> addTask(Function<T, R> task) {
+        tasks.add(task);
+        return this;
+    }
+    
+    public O execute() {
+        Object current = originalInput;
+        for (Function<?, ?> task : tasks) {
+            try {
+                Function<Object, Object> func = (Function<Object, Object>) task;
+                current = func.apply(current);
+            } catch (Exception e) {
+                System.err.println("Error executing task: " + e.getMessage());
+                break;
+            }
+        }
+        return (O) current;
+    }
+    
+    public static void main(String[] args) {
+        TaskExecutor<String, String> executor = new TaskExecutor<>("Start");
+        
+        executor.addTask((String input) -> input + " -> Step 1")
+                .addTask((String input) -> input + " -> Step 2")
+                .addTask((String input) -> input + " -> Final Step");
+        
+        String result = executor.execute();
+        System.out.println("Final Output: " + result);
+    }
+}
