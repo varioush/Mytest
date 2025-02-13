@@ -1,0 +1,184 @@
+import io.netty.bootstrap.ServerBootstrap;
+import io.netty.channel.*;
+import io.netty.channel.nio.NioEventLoopGroup;
+import io.netty.channel.socket.nio.NioServerSocketChannel;
+import io.netty.channel.socket.nio.NioSocketChannel;
+import com.zaxxer.hikari.HikariConfig;
+import com.zaxxer.hikari.HikariDataSource;
+import io.github.bucket4j.*;
+import redis.clients.jedis.Jedis;
+import io.jsonwebtoken.*;
+
+import javax.sql.DataSource;
+import java.lang.annotation.Retention;
+import java.lang.annotation.RetentionPolicy;
+import java.lang.reflect.InvocationTargetException;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.time.Duration;
+import java.util.*;
+
+public class HighPerformanceAPI {
+    private static final HikariDataSource dataSource;
+    private static final Bucket rateLimiter;
+    private static final Jedis redis;
+    private static final Map<String, Command> commandRegistry = new HashMap<>();
+    private static final Map<String, Service> serviceRegistry = new HashMap<>();
+    private static final String SECRET_KEY = "supersecretkey";
+    private static final String PROFILE = System.getProperty("app.profile", "default");
+
+    static {
+        HikariConfig config = new HikariConfig();
+        config.setJdbcUrl("jdbc:mysql://localhost:3306/mydb");
+        config.setUsername("root");
+        config.setPassword("password");
+        config.setMaximumPoolSize(50);
+        config.setMinimumIdle(10);
+        dataSource = new HikariDataSource(config);
+
+        rateLimiter = Bucket4j.builder()
+            .addLimit(Bandwidth.classic(100, Refill.greedy(100, Duration.ofMinutes(1))))
+            .build();
+
+        redis = new Jedis("localhost", 6379);
+
+        registerCommands();
+        registerServices();
+    }
+
+    private static void registerCommands() {
+        try {
+            Set<Class<?>> commandClasses = ClassScanner.getAnnotatedClasses(CommandHandler.class);
+            for (Class<?> clazz : commandClasses) {
+                CommandHandler handler = clazz.getAnnotation(CommandHandler.class);
+                for (String path : handler.paths()) {
+                    commandRegistry.put(path, (Command) clazz.getDeclaredConstructor().newInstance());
+                }
+            }
+        } catch (InstantiationException | IllegalAccessException | InvocationTargetException | NoSuchMethodException e) {
+            e.printStackTrace();
+        }
+    }
+
+    private static void registerServices() {
+        try {
+            Set<Class<?>> serviceClasses = ClassScanner.getAnnotatedClasses(Service.class);
+            for (Class<?> clazz : serviceClasses) {
+                Service service = clazz.getAnnotation(Service.class);
+                if (service.profile().equals(PROFILE) || service.profile().equals("default")) {
+                    serviceRegistry.put(service.name(), (Service) clazz.getDeclaredConstructor().newInstance());
+                }
+            }
+        } catch (InstantiationException | IllegalAccessException | InvocationTargetException | NoSuchMethodException e) {
+            e.printStackTrace();
+        }
+    }
+
+    public static void main(String[] args) {
+        EventLoopGroup bossGroup = new NioEventLoopGroup(1);
+        EventLoopGroup workerGroup = new NioEventLoopGroup();
+        try {
+            ServerBootstrap bootstrap = new ServerBootstrap();
+            bootstrap.group(bossGroup, workerGroup)
+                .channel(NioServerSocketChannel.class)
+                .childHandler(new ChannelInitializer<NioSocketChannel>() {
+                    @Override
+                    protected void initChannel(NioSocketChannel ch) {
+                        ch.pipeline().addLast(new RequestHandler());
+                    }
+                });
+
+            ChannelFuture future = bootstrap.bind(8080).sync();
+            System.out.println("Server started on port 8080");
+            future.channel().closeFuture().sync();
+        } catch (Exception e) {
+            e.printStackTrace();
+        } finally {
+            bossGroup.shutdownGracefully();
+            workerGroup.shutdownGracefully();
+        }
+    }
+
+    static class RequestHandler extends SimpleChannelInboundHandler<String> {
+        @Override
+        protected void channelRead0(ChannelHandlerContext ctx, String msg) {
+            if (!rateLimiter.tryConsume(1)) {
+                ctx.writeAndFlush("429 Too Many Requests");
+                return;
+            }
+
+            APIRequest request = APIRequest.parse(msg);
+            if (!request.getPath().equals("/api/login")) {
+                String token = request.getHeader("Authorization");
+                if (token == null || !validateJWT(token)) {
+                    ctx.writeAndFlush("401 Unauthorized");
+                    return;
+                }
+            }
+
+            Command command = commandRegistry.get(request.getMethod() + " " + request.getPath());
+            if (command != null) {
+                String response = command.execute(request);
+                ctx.writeAndFlush(response);
+            } else {
+                ctx.writeAndFlush("400 Bad Request");
+            }
+        }
+    }
+
+    private static boolean validateJWT(String token) {
+        try {
+            Jwts.parser().setSigningKey(SECRET_KEY).parseClaimsJws(token);
+            return true;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    interface Command {
+        String execute(APIRequest request);
+    }
+
+    @Retention(RetentionPolicy.RUNTIME)
+    @interface CommandHandler {
+        String[] paths();
+    }
+
+    @Retention(RetentionPolicy.RUNTIME)
+    @interface Service {
+        String name();
+        String profile() default "default";
+    }
+
+    @CommandHandler(paths = {"GET /api/order", "GET /api/order/{id}"})
+    static class GetOrderCommand implements Command {
+        @Override
+        public String execute(APIRequest request) {
+            String orderId = request.getPathParam("id");
+            return fetchOrderFromDB(orderId);
+        }
+
+        private String fetchOrderFromDB(String orderId) {
+            String cacheKey = "order:" + orderId;
+            String cachedData = redis.get(cacheKey);
+            if (cachedData != null) {
+                return cachedData;
+            }
+
+            try (Connection conn = dataSource.getConnection();
+                 PreparedStatement stmt = conn.prepareStatement("SELECT data FROM orders WHERE id = ?")) {
+                stmt.setString(1, orderId);
+                ResultSet rs = stmt.executeQuery();
+                if (rs.next()) {
+                    String data = rs.getString("data");
+                    redis.setex(cacheKey, 600, data);
+                    return data;
+                }
+            } catch (Exception e) {
+                e.printStackTrace();
+            }
+            return "Order not found";
+        }
+    }
+}
