@@ -1,0 +1,250 @@
+Welcome file
+Welcome file
+
+import com.google.inject.*;
+import com.fasterxml.jackson.databind.*;
+import com.fasterxml.jackson.dataformat.xml.XmlMapper;
+import org.reflections.Reflections;
+import java.lang.annotation.*;
+import java.lang.reflect.*;
+import java.util.*;
+import java.io.*;
+import javax.servlet.*;
+import javax.servlet.http.*;
+import org.apache.commons.fileupload.*;
+import org.apache.commons.fileupload.disk.*;
+import org.apache.commons.fileupload.servlet.*;
+import org.apache.catalina.LifecycleException;
+import org.apache.catalina.startup.Tomcat;
+
+// @Value Annotation for Injecting Config Values
+@Retention(RetentionPolicy.RUNTIME)
+@Target(ElementType.FIELD)
+@interface Value {
+    String value();
+}
+
+// @AutoBind Annotation for Automatic Binding
+@Retention(RetentionPolicy.RUNTIME)
+@Target(ElementType.TYPE)
+@interface AutoBind {}
+
+// @Controller Annotation for Marking Controllers
+@Retention(RetentionPolicy.RUNTIME)
+@Target(ElementType.TYPE)
+@interface Controller {
+    String value();
+}
+
+// @RequestMapping for Method-Level Routing
+@Retention(RetentionPolicy.RUNTIME)
+@Target(ElementType.METHOD)
+@interface RequestMapping {
+    String value();
+}
+
+// APIRequest class to encapsulate request details
+class APIRequest {
+    private final String method;
+    private final Map<String, String> headers;
+    private final Map<String, String> cookies;
+    private final Object body;
+
+    public APIRequest(HttpServletRequest request, Object body) {
+        this.method = request.getMethod();
+        this.headers = extractHeaders(request);
+        this.cookies = extractCookies(request);
+        this.body = body;
+    }
+
+    private Map<String, String> extractHeaders(HttpServletRequest request) {
+        Map<String, String> headers = new HashMap<>();
+        Enumeration<String> headerNames = request.getHeaderNames();
+        while (headerNames.hasMoreElements()) {
+            String name = headerNames.nextElement();
+            headers.put(name, request.getHeader(name));
+        }
+        return headers;
+    }
+
+    private Map<String, String> extractCookies(HttpServletRequest request) {
+        Map<String, String> cookies = new HashMap<>();
+        if (request.getCookies() != null) {
+            for (Cookie cookie : request.getCookies()) {
+                cookies.put(cookie.getName(), cookie.getValue());
+            }
+        }
+        return cookies;
+    }
+
+    public String getMethod() { return method; }
+    public Map<String, String> getHeaders() { return headers; }
+    public Map<String, String> getCookies() { return cookies; }
+    public Object getBody() { return body; }
+}
+
+// UploadedFile class to represent multipart files
+class UploadedFile {
+    private final String fileName;
+    private final String contentType;
+    private final byte[] data;
+
+    public UploadedFile(FileItem fileItem) throws IOException {
+        this.fileName = fileItem.getName();
+        this.contentType = fileItem.getContentType();
+        this.data = fileItem.get();
+    }
+
+    public String getFileName() { return fileName; }
+    public String getContentType() { return contentType; }
+    public byte[] getData() { return data; }
+}
+
+// Router class to handle request routing
+class Router {
+    private final Injector injector;
+    private final Map<String, Method> routeMappings = new HashMap<>();
+    private final Map<String, Object> controllers = new HashMap<>();
+
+    public Router(Injector injector, String basePackage) {
+        this.injector = injector;
+        scanControllers(basePackage);
+    }
+
+    private void scanControllers(String basePackage) {
+        Reflections reflections = new Reflections(basePackage);
+        Set<Class<?>> controllerClasses = reflections.getTypesAnnotatedWith(Controller.class);
+        for (Class<?> controllerClass : controllerClasses) {
+            Object controllerInstance = injector.getInstance(controllerClass);
+            controllers.put(controllerClass.getAnnotation(Controller.class).value(), controllerInstance);
+            for (Method method : controllerClass.getDeclaredMethods()) {
+                if (method.isAnnotationPresent(RequestMapping.class)) {
+                    routeMappings.put(method.getAnnotation(RequestMapping.class).value(), method);
+                }
+            }
+        }
+    }
+
+    public void route(HttpServletRequest req, HttpServletResponse resp) throws Exception {
+        String path = req.getPathInfo();
+        Method method = routeMappings.get(path);
+        if (method == null) {
+            resp.sendError(HttpServletResponse.SC_NOT_FOUND, "Endpoint not found");
+            return;
+        }
+
+        Object controller = controllers.get(method.getDeclaringClass().getAnnotation(Controller.class).value());
+        APIRequest apiRequest = ContentTypeAdapter.parseRequest(req, method.getParameterTypes()[0]);
+        Object response = method.invoke(controller, apiRequest);
+        ContentTypeResponseAdapter.writeResponse(resp, response, req.getHeader("Accept"));
+    }
+}
+
+// Adapter for handling different content types
+class ContentTypeAdapter {
+    private static final ObjectMapper jsonMapper = new ObjectMapper();
+    private static final XmlMapper xmlMapper = new XmlMapper();
+    
+    public static APIRequest parseRequest(HttpServletRequest request, Class<?> bodyType) throws Exception {
+        Object body = null;
+        String contentType = request.getContentType();
+        if (contentType == null || contentType.contains("application/json")) {
+            body = jsonMapper.readValue(request.getReader(), bodyType);
+        } else if (contentType.contains("application/xml")) {
+            body = xmlMapper.readValue(request.getReader(), bodyType);
+        } else if (contentType.contains("text/plain")) {
+            body = request.getReader().readLine();
+        } else if (contentType.startsWith("multipart/form-data")) {
+            body = handleMultipart(request);
+        }
+        return new APIRequest(request, body);
+    }
+
+    private static Map<String, Object> handleMultipart(HttpServletRequest request) throws Exception {
+        if (!ServletFileUpload.isMultipartContent(request)) {
+            throw new IOException("Request is not multipart");
+        }
+        ServletFileUpload upload = new ServletFileUpload(new DiskFileItemFactory());
+        List<FileItem> items = upload.parseRequest(request);
+        Map<String, Object> formFields = new HashMap<>();
+        for (FileItem item : items) {
+            if (item.isFormField()) {
+                formFields.put(item.getFieldName(), item.getString());
+            } else {
+                formFields.put(item.getFieldName(), new UploadedFile(item));
+            }
+        }
+        return formFields;
+    }
+
+
+}
+
+// Embedded Tomcat setup
+class EmbeddedTomcat {
+    public static void start(Router router) throws LifecycleException {
+        Tomcat tomcat = new Tomcat();
+        tomcat.setPort(8080);
+        tomcat.getConnector();
+        
+        tomcat.addContext("", new File(".").getAbsolutePath());
+        
+        Tomcat.addServlet(tomcat.getHost().findChild(""), "dispatcher", new HttpServlet() {
+            @Override
+            protected void service(HttpServletRequest req, HttpServletResponse resp) throws ServletException, IOException {
+                try {
+                    router.route(req, resp);
+                } catch (Exception e) {
+                    resp.sendError(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, e.getMessage());
+                }
+            }
+        });
+        
+        tomcat.getHost().findChild("").addServletMappingDecoded("/*", "dispatcher");
+        tomcat.start();
+        tomcat.getServer().await();
+    }
+}
+// Sample Controller
+@Controller("/api")
+class SampleController {
+    @RequestMapping("/hello")
+    public String sayHello() {
+        return "Hello, World!";
+    }
+}
+
+
+
+// Main Application Setup
+public class Main {
+    public static void main(String[] args) throws LifecycleException {
+        String basePackage = "com.example";
+        Injector injector = Guice.createInjector(new AutoScanModule(basePackage));
+        Router router = new Router(injector, basePackage);
+        EmbeddedTomcat.start(router);
+    }
+}
+
+// Adapter for formatting responses based on Accept header
+class ContentTypeResponseAdapter {
+    private static final ObjectMapper jsonMapper = new ObjectMapper();
+    private static final XmlMapper xmlMapper = new XmlMapper();
+
+    public static void writeResponse(HttpServletResponse response, Object responseObject, String acceptHeader) throws IOException {
+        response.setCharacterEncoding("UTF-8");
+        if (acceptHeader == null || acceptHeader.contains("application/json")) {
+            response.setContentType("application/json");
+            jsonMapper.writeValue(response.getWriter(), responseObject);
+        } else if (acceptHeader.contains("application/xml")) {
+            response.setContentType("application/xml");
+            xmlMapper.writeValue(response.getWriter(), responseObject);
+        } else if (acceptHeader.contains("text/plain")) {
+            response.setContentType("text/plain");
+            response.getWriter().write(responseObject.toString());
+        } else {
+            response.sendError(HttpServletResponse.SC_UNSUPPORTED_MEDIA_TYPE, "Unsupported Accept Type: " + acceptHeader);
+        }
+    }
+}
+HTML 7233 characters 744 words 215 paragraphs
