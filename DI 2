@@ -1,0 +1,202 @@
+import com.google.inject.*;
+import org.reflections.Reflections;
+import java.lang.annotation.*;
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
+import java.util.Set;
+import java.util.HashMap;
+import java.util.Map;
+import org.h2.jdbcx.JdbcDataSource;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.io.IOException;
+import javax.servlet.ServletException;
+import javax.servlet.http.HttpServlet;
+import javax.servlet.http.HttpServletRequest;
+import javax.servlet.http.HttpServletResponse;
+import org.apache.catalina.LifecycleException;
+import org.apache.catalina.startup.Tomcat;
+
+// @Value Annotation for Injecting Config Values
+@Retention(RetentionPolicy.RUNTIME)
+@Target(ElementType.FIELD)
+@interface Value {
+    String value();
+}
+
+// @AutoBind Annotation for Automatic Binding
+@Retention(RetentionPolicy.RUNTIME)
+@Target(ElementType.TYPE)
+@interface AutoBind {}
+
+// @Controller Annotation for Marking Controllers
+@Retention(RetentionPolicy.RUNTIME)
+@Target(ElementType.TYPE)
+@interface Controller {
+    String value();
+}
+
+// @RequestMapping for Method-Level Routing
+@Retention(RetentionPolicy.RUNTIME)
+@Target(ElementType.METHOD)
+@interface RequestMapping {
+    String value();
+}
+
+// Config Provider for Injecting @Value Annotations
+class ConfigProvider implements Provider<String> {
+    private final ConfigLoader configLoader;
+    private final String key;
+
+    @Inject
+    public ConfigProvider(ConfigLoader configLoader, Field field) {
+        this.configLoader = configLoader;
+        this.key = field.getAnnotation(Value.class).value();
+    }
+
+    @Override
+    public String get() {
+        Object value = configLoader.getProperty(key);
+        if (value == null) {
+            throw new ProvisionException("Missing config key: " + key);
+        }
+        return value.toString();
+    }
+}
+
+// Config Loader Interface
+interface ConfigLoader {
+    Object getProperty(String key);
+}
+
+// Auto-Scanning Module for Guice
+class AutoScanModule extends AbstractModule {
+    private final String basePackage;
+
+    public AutoScanModule(String basePackage) {
+        this.basePackage = basePackage;
+    }
+
+    @Override
+    protected void configure() {
+        Reflections reflections = new Reflections(basePackage);
+
+        // Auto-bind all classes annotated with @AutoBind
+        Set<Class<?>> autoBindClasses = reflections.getTypesAnnotatedWith(AutoBind.class);
+        for (Class<?> clazz : autoBindClasses) {
+            bind(clazz);
+        }
+
+        // Auto-bind all classes annotated with @Controller
+        Set<Class<?>> controllerClasses = reflections.getTypesAnnotatedWith(Controller.class);
+        for (Class<?> clazz : controllerClasses) {
+            bind(clazz).in(Scopes.SINGLETON);
+        }
+    }
+}
+
+// H2 Database Connection
+class Database {
+    private static final String DB_URL = "jdbc:h2:mem:test;DB_CLOSE_DELAY=-1";
+    private static Connection connection;
+
+    static {
+        try {
+            JdbcDataSource ds = new JdbcDataSource();
+            ds.setURL(DB_URL);
+            connection = ds.getConnection();
+            connection.createStatement().execute("CREATE TABLE users (username VARCHAR(255), password VARCHAR(255))");
+        } catch (SQLException e) {
+            throw new RuntimeException("Failed to initialize database", e);
+        }
+    }
+
+    public static void insertUser(String username, String password) {
+        try (PreparedStatement stmt = connection.prepareStatement("INSERT INTO users (username, password) VALUES (?, ?)")) {
+            stmt.setString(1, username);
+            stmt.setString(2, password);
+            stmt.executeUpdate();
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
+    }
+
+    public static boolean fetchUser(String username, String password) {
+        try (PreparedStatement stmt = connection.prepareStatement("SELECT * FROM users WHERE username = ? AND password = ?")) {
+            stmt.setString(1, username);
+            stmt.setString(2, password);
+            ResultSet rs = stmt.executeQuery();
+            return rs.next();
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
+        return false;
+    }
+}
+
+// Router for handling request mappings
+class Router {
+    private final Map<String, Method> routeMap = new HashMap<>();
+    private final Map<Class<?>, Object> controllerInstances = new HashMap<>();
+
+    public Router(Injector injector, String basePackage) {
+        Reflections reflections = new Reflections(basePackage);
+        Set<Class<?>> controllerClasses = reflections.getTypesAnnotatedWith(Controller.class);
+
+        for (Class<?> controllerClass : controllerClasses) {
+            Object controllerInstance = injector.getInstance(controllerClass);
+            controllerInstances.put(controllerClass, controllerInstance);
+            for (Method method : controllerClass.getDeclaredMethods()) {
+                if (method.isAnnotationPresent(RequestMapping.class)) {
+                    String path = method.getAnnotation(RequestMapping.class).value();
+                    routeMap.put(path, method);
+                }
+            }
+        }
+    }
+
+    public void handleRequest(String path) {
+        Method method = routeMap.get(path);
+        if (method != null) {
+            Object controllerInstance = controllerInstances.get(method.getDeclaringClass());
+            try {
+                method.invoke(controllerInstance);
+            } catch (IllegalAccessException | InvocationTargetException e) {
+                e.printStackTrace();
+            }
+        } else {
+            System.out.println("No handler found for: " + path);
+        }
+    }
+}
+
+// Embedded Tomcat Server
+class EmbeddedTomcat {
+    public static void start(Router router) throws LifecycleException {
+        Tomcat tomcat = new Tomcat();
+        tomcat.setPort(8080);
+        tomcat.addContext("", null);
+        tomcat.addServlet("", "dispatcher", new HttpServlet() {
+            @Override
+            protected void service(HttpServletRequest req, HttpServletResponse resp) throws ServletException, IOException {
+                String path = req.getPathInfo();
+                router.handleRequest(path);
+                resp.getWriter().write("Handled request: " + path);
+            }
+        }).addMapping("/*");
+        tomcat.start();
+        tomcat.getServer().await();
+    }
+}
+
+// Main Application Setup
+public class Main {
+    public static void main(String[] args) throws LifecycleException {
+        String basePackage = "com.example";
+        Injector injector = Guice.createInjector(new AutoScanModule(basePackage));
+        Router router = new Router(injector, basePackage);
+        EmbeddedTomcat.start(router);
+    }
+}
