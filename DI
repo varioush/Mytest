@@ -1,0 +1,181 @@
+import com.google.inject.*;
+import org.reflections.Reflections;
+import java.lang.annotation.*;
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
+import java.util.Set;
+import java.util.HashMap;
+import java.util.Map;
+
+// @Value Annotation for Injecting Config Values
+@Retention(RetentionPolicy.RUNTIME)
+@Target(ElementType.FIELD)
+@interface Value {
+    String value();
+}
+
+// @AutoBind Annotation for Automatic Binding
+@Retention(RetentionPolicy.RUNTIME)
+@Target(ElementType.TYPE)
+@interface AutoBind {}
+
+// @Controller Annotation for Marking Controllers
+@Retention(RetentionPolicy.RUNTIME)
+@Target(ElementType.TYPE)
+@interface Controller {
+    String value();
+}
+
+// @RequestMapping for Method-Level Routing
+@Retention(RetentionPolicy.RUNTIME)
+@Target(ElementType.METHOD)
+@interface RequestMapping {
+    String value();
+}
+
+// Config Provider for Injecting @Value Annotations
+class ConfigProvider implements Provider<String> {
+    private final ConfigLoader configLoader;
+    private final String key;
+
+    @Inject
+    public ConfigProvider(ConfigLoader configLoader, Field field) {
+        this.configLoader = configLoader;
+        this.key = field.getAnnotation(Value.class).value();
+    }
+
+    @Override
+    public String get() {
+        Object value = configLoader.getProperty(key);
+        if (value == null) {
+            throw new ProvisionException("Missing config key: " + key);
+        }
+        return value.toString();
+    }
+}
+
+// Config Loader Interface
+interface ConfigLoader {
+    Object getProperty(String key);
+}
+
+// Auto-Scanning Module for Guice
+class AutoScanModule extends AbstractModule {
+    private final String basePackage;
+
+    public AutoScanModule(String basePackage) {
+        this.basePackage = basePackage;
+    }
+
+    @Override
+    protected void configure() {
+        Reflections reflections = new Reflections(basePackage);
+
+        // Auto-bind all classes annotated with @AutoBind
+        Set<Class<?>> autoBindClasses = reflections.getTypesAnnotatedWith(AutoBind.class);
+        for (Class<?> clazz : autoBindClasses) {
+            bind(clazz);
+        }
+
+        // Auto-bind all classes annotated with @Controller
+        Set<Class<?>> controllerClasses = reflections.getTypesAnnotatedWith(Controller.class);
+        for (Class<?> clazz : controllerClasses) {
+            bind(clazz).in(Scopes.SINGLETON);
+        }
+    }
+}
+
+// Example Usage
+@AutoBind
+class MyService {
+    void serve() {
+        System.out.println("Service is running...");
+    }
+}
+
+@Controller("/api")
+class MyController {
+    private final MyService service;
+
+    @Inject
+    public MyController(MyService service) {
+        this.service = service;
+    }
+
+    @RequestMapping("/hello")
+    public void sayHello() {
+        System.out.println("Hello from MyController");
+    }
+
+    @RequestMapping("/serve")
+    public void handleRequest() {
+        service.serve();
+    }
+}
+
+// Example Usage of @Value
+@AutoBind
+class ConfiguredService {
+    @Inject
+    private ConfigLoader configLoader;
+
+    @Value("app.name")
+    private String appName;
+
+    public void printConfig() {
+        System.out.println("Application Name: " + appName);
+    }
+}
+
+// Simple Router to Call Methods Based on Request Mapping
+class Router {
+    private final Map<String, Method> routes = new HashMap<>();
+    private final Injector injector;
+
+    public Router(Injector injector) {
+        this.injector = injector;
+        registerRoutes();
+    }
+
+    private void registerRoutes() {
+        Reflections reflections = new Reflections("com.example");
+        Set<Class<?>> controllers = reflections.getTypesAnnotatedWith(Controller.class);
+        for (Class<?> controller : controllers) {
+            for (Method method : controller.getDeclaredMethods()) {
+                if (method.isAnnotationPresent(RequestMapping.class)) {
+                    String path = method.getAnnotation(RequestMapping.class).value();
+                    routes.put(path, method);
+                }
+            }
+        }
+    }
+
+    public void handleRequest(String path) {
+        Method method = routes.get(path);
+        if (method != null) {
+            try {
+                Object instance = injector.getInstance(method.getDeclaringClass());
+                method.invoke(instance);
+            } catch (Exception e) {
+                e.printStackTrace();
+            }
+        } else {
+            System.out.println("No route found for: " + path);
+        }
+    }
+}
+
+// Main Application Setup
+public class Main {
+    public static void main(String[] args) {
+        Injector injector = Guice.createInjector(new AutoScanModule("com.example"));
+        Router router = new Router(injector);
+        
+        // Simulating Requests
+        router.handleRequest("/api/hello");
+        router.handleRequest("/api/serve");
+        
+        ConfiguredService configuredService = injector.getInstance(ConfiguredService.class);
+        configuredService.printConfig();
+    }
+}
