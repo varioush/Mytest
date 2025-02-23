@@ -1,0 +1,167 @@
+import java.lang.invoke.MethodHandle;
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.MethodType;
+import java.util.*;
+import java.util.concurrent.*;
+import java.util.logging.Logger;
+
+public class DIContainer {
+    private static final Logger logger = Logger.getLogger(DIContainer.class.getName());
+    private final Map<Class<?>, Object> instanceCache = new ConcurrentHashMap<>();
+    private final Map<Class<?>, List<Class<?>>> dependencies = new HashMap<>();
+    private final Map<Class<?>, Class<?>> bindings = new HashMap<>();
+    private final ExecutorService executor = Executors.newFixedThreadPool(Runtime.getRuntime().availableProcessors());
+
+    public void bind(Class<?> iface, Class<?> impl) {
+        bindings.put(iface, impl);
+    }
+
+    public void initialize(Set<Class<?>> classes) throws Exception {
+        logger.info("Initializing DI Container with classes: " + classes);
+        Map<Class<?>, Future<?>> futures = new HashMap<>();
+        for (Class<?> clazz : classes) {
+            futures.put(clazz, executor.submit(() -> instantiate(clazz)));
+        }
+        for (Future<?> future : futures.values()) {
+            future.get(); // Ensuring all dependencies are resolved
+        }
+        executor.shutdown();
+        logContainerContents(classes);
+        logDependencyGraph();
+    }
+
+    private Object instantiate(Class<?> clazz) throws Exception {
+        if (instanceCache.containsKey(clazz)) return instanceCache.get(clazz);
+        if (bindings.containsKey(clazz)) clazz = bindings.get(clazz);
+        
+        checkCyclicDependency(clazz, new HashSet<>());
+        Constructor<?> constructor = clazz.getConstructors()[0];
+        Class<?>[] paramTypes = constructor.getParameterTypes();
+        
+        List<Class<?>> deps = Arrays.asList(paramTypes);
+        dependencies.put(clazz, deps);
+        
+        Object[] params = deps.stream()
+                .map(param -> {
+                    try {
+                        return instantiate(param);
+                    } catch (Exception e) {
+                        throw new RuntimeException(e);
+                    }
+                }).toArray();
+        
+        MethodHandle constructorHandle = MethodHandles.lookup().findConstructor(clazz, MethodType.methodType(void.class, paramTypes));
+        Object instance = constructorHandle.invokeWithArguments(params);
+        instanceCache.put(clazz, instance);
+        return instance;
+    }
+
+    private void checkCyclicDependency(Class<?> clazz, Set<Class<?>> visited) {
+        if (!dependencies.containsKey(clazz)) return;
+        if (visited.contains(clazz)) throw new RuntimeException("Cyclic dependency detected: " + clazz.getName());
+        visited.add(clazz);
+        for (Class<?> dependency : dependencies.get(clazz)) {
+            checkCyclicDependency(dependency, visited);
+        }
+        visited.remove(clazz);
+    }
+
+    public <T> T getInstance(Class<T> clazz) {
+        if (bindings.containsKey(clazz)) clazz = bindings.get(clazz);
+        return clazz.cast(instanceCache.get(clazz));
+    }
+
+    private void logContainerContents(Set<Class<?>> classes) {
+        Set<Class<?>> registeredClasses = instanceCache.keySet();
+        Set<Class<?>> unregisteredClasses = new HashSet<>(classes);
+        unregisteredClasses.removeAll(registeredClasses);
+
+        logger.info("Registered DI classes: " + registeredClasses);
+        logger.warning("Unregistered classes (not part of DI container): " + unregisteredClasses);
+    }
+
+    private void logDependencyGraph() {
+        logger.info("Dependency Graph:");
+        for (Map.Entry<Class<?>, List<Class<?>>> entry : dependencies.entrySet()) {
+            logger.info(entry.getKey().getSimpleName() + " depends on " + entry.getValue().stream().map(Class::getSimpleName).toList());
+        }
+    }
+}
+
+
+import java.io.File;
+import java.lang.reflect.Modifier;
+import java.net.URL;
+import java.util.HashSet;
+import java.util.Set;
+
+public class DIContainerInitializer {
+
+    public static DIContainer setupDIContainer(String basePackage) throws Exception {
+        DIContainer container = new DIContainer();
+        
+        // Scan for classes annotated with @Component
+        Set<Class<?>> componentClasses = scanForComponents(basePackage);
+
+        // Bind interfaces to their implementations dynamically
+        bindInterfaces(container, componentClasses);
+        
+        // Register components in DIContainer
+        container.initialize(componentClasses);
+        
+        return container;
+    }
+
+    private static Set<Class<?>> scanForComponents(String basePackage) throws Exception {
+        Set<Class<?>> components = new HashSet<>();
+        String path = basePackage.replace('.', '/');
+        ClassLoader classLoader = Thread.currentThread().getContextClassLoader();
+        URL resource = classLoader.getResource(path);
+        
+        if (resource == null) {
+            throw new RuntimeException("Package not found: " + basePackage);
+        }
+        
+        File directory = new File(resource.toURI());
+        for (File file : directory.listFiles()) {
+            if (file.getName().endsWith(".class")) {
+                String className = basePackage + "." + file.getName().replace(".class", "");
+                Class<?> clazz = Class.forName(className);
+                
+                // Include only classes annotated with @Component and not interfaces or abstract classes
+                if (clazz.isAnnotationPresent(Component.class) && !clazz.isInterface() && !Modifier.isAbstract(clazz.getModifiers())) {
+                    components.add(clazz);
+                }
+            }
+        }
+        
+        return components;
+    }
+
+    private static void bindInterfaces(DIContainer container, Set<Class<?>> componentClasses) {
+        for (Class<?> implClass : componentClasses) {
+            for (Class<?> iface : implClass.getInterfaces()) {
+                container.bind(iface, implClass);
+            }
+        }
+    }
+}
+
+
+import java.lang.annotation.Retention;
+import java.lang.annotation.RetentionPolicy;
+
+@Retention(RetentionPolicy.RUNTIME)
+public @interface Component {
+}
+
+
+public class Main {
+    public static void main(String[] args) throws Exception {
+        DIContainer container = DIContainerInitializer.setupDIContainer("com.example");
+
+        // Get instance of the interface (automatically bound to implementation)
+        Service service = container.getInstance(Service.class);
+        service.perform();
+    }
+}
