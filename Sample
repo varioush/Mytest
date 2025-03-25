@@ -1,0 +1,166 @@
+{
+  "Comment": "Randomized Step Function for Anonymization",
+  "StartAt": "StartA12B",
+  "States": {
+    "StartA12B": {
+      "Type": "Task",
+      "Resource": "arn:aws:lambda:REGION:ACCOUNT_ID:function:lambda-X12A",
+      "Retry": [
+        {
+          "ErrorEquals": ["NetworkException"],
+          "IntervalSeconds": 30,
+          "MaxAttempts": 0,
+          "BackoffRate": 1.0
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["NonNetworkException"],
+          "Next": "ErrorX78C"
+        }
+      ],
+      "Next": "WaitY34D"
+    },
+    "WaitY34D": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke.waitForTaskToken",
+      "Parameters": {
+        "FunctionName": "arn:aws:lambda:REGION:ACCOUNT_ID:function:lambda-Z89D",
+        "Payload": {
+          "requestId.$": "$.requestId",
+          "taskToken.$": "$$.Task.Token"
+        }
+      },
+      "Retry": [
+        {
+          "ErrorEquals": ["NetworkException"],
+          "IntervalSeconds": 30,
+          "MaxAttempts": 0,
+          "BackoffRate": 1.0
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["NonNetworkException"],
+          "Next": "ErrorX78C"
+        }
+      ],
+      "Next": "CheckS56F"
+    },
+    "CheckS56F": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::dynamodb:getItem",
+      "Parameters": {
+        "TableName": "TableB45G",
+        "Key": {
+          "id": {
+            "S.$": "$.requestId"
+          }
+        }
+      },
+      "ResultPath": "$.checkStatus",
+      "Retry": [
+        {
+          "ErrorEquals": ["NetworkException"],
+          "IntervalSeconds": 30,
+          "MaxAttempts": 0,
+          "BackoffRate": 1.0
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["NonNetworkException"],
+          "Next": "ErrorX78C"
+        }
+      ],
+      "Next": "ChoiceC99H"
+    },
+    "ChoiceC99H": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.checkStatus.Item.status.S",
+          "StringEquals": "success",
+          "Next": "ProcessP12J"
+        },
+        {
+          "Variable": "$.checkStatus.Item.status.S",
+          "StringEquals": "failure",
+          "Next": "ErrorX78C"
+        }
+      ],
+      "Default": "ErrorX78C"
+    },
+    "ProcessP12J": {
+      "Type": "Task",
+      "Resource": "arn:aws:lambda:REGION:ACCOUNT_ID:function:lambda-P34K",
+      "Retry": [
+        {
+          "ErrorEquals": ["NetworkException"],
+          "IntervalSeconds": 30,
+          "MaxAttempts": 0,
+          "BackoffRate": 1.0
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["NonNetworkException"],
+          "Next": "ErrorX78C"
+        }
+      ],
+      "Next": "VerifyV56L"
+    },
+    "VerifyV56L": {
+      "Type": "Task",
+      "Resource": "arn:aws:lambda:REGION:ACCOUNT_ID:function:lambda-V78M",
+      "Next": "TitleT34N"
+    },
+    "TitleT34N": {
+      "Type": "Task",
+      "Resource": "arn:aws:lambda:REGION:ACCOUNT_ID:function:lambda-T56P",
+      "Next": "AccountA89Q"
+    },
+    "AccountA89Q": {
+      "Type": "Task",
+      "Resource": "arn:aws:lambda:REGION:ACCOUNT_ID:function:lambda-A90R",
+      "Next": "ModifyM23S"
+    },
+    "ModifyM23S": {
+      "Type": "Task",
+      "Resource": "arn:aws:lambda:REGION:ACCOUNT_ID:function:lambda-M12T",
+      "Next": "UpdateU45U"
+    },
+    "UpdateU45U": {
+      "Type": "Task",
+      "Resource": "arn:aws:lambda:REGION:ACCOUNT_ID:function:lambda-U78V",
+      "Next": "DistributeD99W"
+    },
+    "DistributeD99W": {
+      "Type": "Task",
+      "Resource": "arn:aws:lambda:REGION:ACCOUNT_ID:function:lambda-D56X",
+      "End": true
+    },
+    "ErrorX78C": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::dynamodb:updateItem",
+      "Parameters": {
+        "TableName": "TableB45G",
+        "Key": {
+          "id": {
+            "S.$": "$.requestId"
+          }
+        },
+        "UpdateExpression": "SET #status = :status",
+        "ExpressionAttributeNames": {
+          "#status": "status"
+        },
+        "ExpressionAttributeValues": {
+          ":status": {
+            "S": "unknown_error"
+          }
+        }
+      },
+      "End": true
+    }
+  }
+}
