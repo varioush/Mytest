@@ -1,0 +1,212 @@
+// PACKAGE: com.example.httpclient
+
+package com.example.httpclient;
+
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.core.io.ByteArrayResource;
+import org.springframework.http.*;
+import org.springframework.stereotype.Component;
+import org.springframework.util.LinkedMultiValueMap;
+import org.springframework.util.MultiValueMap;
+import org.springframework.web.client.RestTemplate;
+
+import java.util.Map;
+
+@Component
+@RequiredArgsConstructor
+@Slf4j
+public class HttpClientAdapter {
+
+    private final RestTemplate restTemplate;
+    private final HttpRequestExecutor executor;
+
+    public String get(FailedEvent event) {
+        log.info("GET Request to URL: {}, Headers: {}", event.url(), event.headers());
+        HttpEntity<Void> request = new HttpEntity<>(buildHeaders(event.headers()));
+        RequestAttempt requestAttempt = new RequestAttempt(event.url(), "GET", null, event.headers());
+        return executor.execute(
+                () -> restTemplate.exchange(event.url(), HttpMethod.GET, request, String.class),
+                true,
+                requestAttempt
+        ).getBody();
+    }
+
+    public String post(FailedEvent event) {
+        log.info("POST Request to URL: {}, Body: {}, Headers: {}", event.url(), event.body(), event.headers());
+        HttpEntity<Object> request = new HttpEntity<>(event.body(), buildHeaders(event.headers()));
+        RequestAttempt requestAttempt = new RequestAttempt(event.url(), "POST", event.body(), event.headers());
+        return executor.execute(
+                () -> restTemplate.postForEntity(event.url(), request, String.class),
+                true,
+                requestAttempt
+        ).getBody();
+    }
+
+    public String put(FailedEvent event) {
+        log.info("PUT Request to URL: {}, Body: {}, Headers: {}", event.url(), event.body(), event.headers());
+        HttpEntity<Object> request = new HttpEntity<>(event.body(), buildHeaders(event.headers()));
+        RequestAttempt requestAttempt = new RequestAttempt(event.url(), "PUT", event.body(), event.headers());
+        return executor.execute(
+                () -> {
+                    restTemplate.put(event.url(), request);
+                    return ResponseEntity.ok("PUT success");
+                },
+                true,
+                requestAttempt
+        ).getBody();
+    }
+
+    public String postMultipart(FailedEvent event) {
+        log.info("Multipart POST to URL: {}, FormData: {}, Files: {}, Headers: {}",
+                event.url(), event.formData(), event.fileMap(), event.headers());
+
+        HttpHeaders httpHeaders = buildHeaders(event.headers());
+        httpHeaders.setContentType(MediaType.MULTIPART_FORM_DATA);
+
+        MultiValueMap<String, Object> formData = new LinkedMultiValueMap<>();
+
+        if (event.formData() != null) {
+            event.formData().forEach(formData::add);
+        }
+
+        if (event.fileMap() != null) {
+            event.fileMap().forEach((key, value) -> {
+                ByteArrayResource fileResource = new ByteArrayResource(value) {
+                    @Override
+                    public String getFilename() {
+                        return key;
+                    }
+                };
+                formData.add(key, fileResource);
+            });
+        }
+
+        HttpEntity<MultiValueMap<String, Object>> request = new HttpEntity<>(formData, httpHeaders);
+        RequestAttempt requestAttempt = new RequestAttempt(event.url(), "POST_MULTIPART", null, event.headers());
+        return executor.execute(
+                () -> restTemplate.postForEntity(event.url(), request, String.class),
+                true,
+                requestAttempt
+        ).getBody();
+    }
+
+    private HttpHeaders buildHeaders(Map<String, String> headerMap) {
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.APPLICATION_JSON);
+        if (headerMap != null) {
+            headerMap.forEach(headers::set);
+        }
+        return headers;
+    }
+}
+
+
+// ---- HttpRequestExecutor.java ----
+
+package com.example.httpclient;
+
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.http.ResponseEntity;
+import org.springframework.stereotype.Component;
+import org.springframework.web.client.HttpClientErrorException;
+import org.springframework.web.client.HttpServerErrorException;
+
+import java.time.Instant;
+
+@Component
+@RequiredArgsConstructor
+@Slf4j
+public class HttpRequestExecutor {
+
+    private static final int MAX_RETRIES = 3;
+    private static final long MAX_BACKOFF = 30_000;
+
+    private final RetryHandler retryHandler;
+
+    public ResponseEntity<String> execute(HttpOperation operation, boolean retryEnabled, RequestAttempt requestAttempt) {
+        int attempt = 0;
+
+        while (true) {
+            try {
+                return operation.execute();
+
+            } catch (HttpClientErrorException e) {
+                log.warn("Client error on {}: {}", requestAttempt.url(), e.getMessage());
+                throw new DomainErrorException("Client error: " + e.getMessage());
+
+            } catch (HttpServerErrorException e) {
+                attempt++;
+                log.error("Server error on {}: {} (attempt #{})", requestAttempt.url(), e.getMessage(), attempt);
+
+                if (retryHandler != null) {
+                    FailedEvent event = new FailedEvent(
+                            requestAttempt.url(),
+                            requestAttempt.method(),
+                            requestAttempt.body(),
+                            requestAttempt.headers(),
+                            e.getMessage(),
+                            Instant.now(),
+                            generateCorrelationId(),
+                            null,
+                            null
+                    );
+                    retryHandler.onFailure(event);
+                    throw new NetworkErrorException("Server error forwarded to retry strategy.");
+                } else {
+                    if (attempt >= MAX_RETRIES) {
+                        log.error("Max retries reached for {}", requestAttempt.url());
+                        throw new NetworkErrorException("Server error after " + attempt + " retry attempts.");
+                    }
+                    waitBeforeRetry(attempt);
+                }
+            }
+        }
+    }
+
+    private void waitBeforeRetry(int attempt) {
+        long waitMillis = Math.min(MAX_BACKOFF, (long) Math.pow(2, attempt - 1) * 1000);
+        try {
+            log.info("Retrying in {} ms...", waitMillis);
+            Thread.sleep(waitMillis);
+        } catch (InterruptedException ignored) {
+        }
+    }
+
+    private String generateCorrelationId() {
+        return "CID-" + System.currentTimeMillis();
+    }
+}
+
+// ---- RequestAttempt.java ----
+
+package com.example.httpclient;
+
+import java.util.Map;
+
+public record RequestAttempt(
+        String url,
+        String method,
+        String body,
+        Map<String, String> headers
+) {}
+
+// ---- FailedEvent.java ----
+
+package com.example.httpclient;
+
+import java.time.Instant;
+import java.util.Map;
+
+public record FailedEvent(
+        String url,
+        String method,
+        String body,
+        Map<String, String> headers,
+        String errorMessage,
+        Instant timestamp,
+        String correlationId,
+        Map<String, String> formData,
+        Map<String, byte[]> fileMap
+) {}
