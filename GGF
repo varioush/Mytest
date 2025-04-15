@@ -1,0 +1,103 @@
+public class UnifiedRetryExecutor {
+
+    private final ScheduledExecutorService scheduler;
+    private final int maxRetries;
+    private final long backoffMillis;
+    private final Logger logger;
+
+    public UnifiedRetryExecutor(ScheduledExecutorService scheduler,
+                                int maxRetries,
+                                long backoffMillis,
+                                Logger logger) {
+        this.scheduler = scheduler;
+        this.maxRetries = maxRetries;
+        this.backoffMillis = backoffMillis;
+        this.logger = logger;
+    }
+
+    // SYNC version with input
+    public <T> void execute(String requestId,
+                            T input,
+                            Function<T, Boolean> operation,
+                            BiConsumer<T, RetryMetadata> onSuccess,
+                            BiConsumer<T, RetryMetadata> onFailure) {
+        Throwable lastException = null;
+
+        for (int attempt = 1; attempt <= maxRetries; attempt++) {
+            try {
+                logger.info("Sync attempt {} for requestId: {}", attempt, requestId);
+                if (operation.apply(input)) {
+                    logger.info("Sync success for requestId: {}", requestId);
+                    onSuccess.accept(input, new RetryMetadata(attempt, null));
+                    return;
+                }
+            } catch (Throwable ex) {
+                lastException = ex;
+                logger.warn("Sync exception at attempt {}: {}", attempt, ex.getMessage());
+            }
+
+            if (attempt < maxRetries) {
+                try {
+                    Thread.sleep(backoffMillis);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    return;
+                }
+            }
+        }
+
+        logger.error("Sync max retries exhausted for requestId: {}", requestId);
+        onFailure.accept(input, new RetryMetadata(maxRetries, lastException));
+    }
+
+    // ASYNC version with input
+    public <T> void executeAsync(String requestId,
+                                 T input,
+                                 Function<T, CompletableFuture<Boolean>> operation,
+                                 BiConsumer<T, RetryMetadata> onSuccess,
+                                 BiConsumer<T, RetryMetadata> onFailure) {
+        attemptAsync(requestId, input, operation, onSuccess, onFailure, 1, null);
+    }
+
+    private <T> void attemptAsync(String requestId,
+                                  T input,
+                                  Function<T, CompletableFuture<Boolean>> operation,
+                                  BiConsumer<T, RetryMetadata> onSuccess,
+                                  BiConsumer<T, RetryMetadata> onFailure,
+                                  int attempt,
+                                  Throwable lastException) {
+
+        logger.info("Async attempt {} for requestId: {}", attempt, requestId);
+
+        operation.apply(input).whenComplete((result, throwable) -> {
+            if (throwable != null) {
+                logger.error("Async exception: {}", throwable.getMessage());
+                handleAsyncFailure(requestId, input, operation, onSuccess, onFailure, attempt, throwable);
+            } else if (Boolean.TRUE.equals(result)) {
+                logger.info("Async success for requestId: {}", requestId);
+                onSuccess.accept(input, new RetryMetadata(attempt, null));
+            } else {
+                logger.warn("Async result false at attempt {}", attempt);
+                handleAsyncFailure(requestId, input, operation, onSuccess, onFailure, attempt, null);
+            }
+        });
+    }
+
+    private <T> void handleAsyncFailure(String requestId,
+                                        T input,
+                                        Function<T, CompletableFuture<Boolean>> operation,
+                                        BiConsumer<T, RetryMetadata> onSuccess,
+                                        BiConsumer<T, RetryMetadata> onFailure,
+                                        int attempt,
+                                        Throwable throwable) {
+
+        if (attempt < maxRetries) {
+            scheduler.schedule(() ->
+                            attemptAsync(requestId, input, operation, onSuccess, onFailure, attempt + 1, throwable),
+                    backoffMillis, TimeUnit.MILLISECONDS);
+        } else {
+            logger.error("Async max retries exhausted for requestId: {}", requestId);
+            onFailure.accept(input, new RetryMetadata(attempt, throwable));
+        }
+    }
+}
