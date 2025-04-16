@@ -1,0 +1,684 @@
+/**
+ * Enum to define how to handle failures after retries
+ */
+public enum FailureStrategy {
+    THROW_EXCEPTION,  // For sync operations that should throw exceptions on failure
+    PUBLISH_TO_SQS    // For operations that should be queued for later retry
+}
+
+/**
+ * Interface for operation executors
+ */
+public interface OperationExecutor {
+    String getApiName();
+    String getOperationName();
+    Object execute(Map<String, Object> params) throws Exception;
+}
+
+/**
+ * Generic retry service for all operations
+ */
+@Service
+@Slf4j
+public class RetryService {
+    
+    private final RetryTemplate retryTemplate;
+    private final SqsService sqsService;
+    
+    @Value("${api.retry.maxAttempts:5}")
+    private int maxAttempts;
+    
+    public RetryService(RetryTemplate retryTemplate, SqsService sqsService) {
+        this.retryTemplate = retryTemplate;
+        this.sqsService = sqsService;
+    }
+    
+    /**
+     * Execute an operation with retry and configurable failure strategy
+     */
+    public Object executeWithRetry(
+            OperationExecutor executor, 
+            Map<String, Object> params,
+            FailureStrategy failureStrategy) {
+        
+        String apiName = executor.getApiName();
+        String operationName = executor.getOperationName();
+        
+        try {
+            return retryTemplate.execute(retryContext -> {
+                try {
+                    log.debug("Executing {}.{}, attempt: {}", apiName, operationName, 
+                            retryContext.getRetryCount() + 1);
+                    return executor.execute(params);
+                } catch (Exception e) {
+                    log.warn("Retry attempt for {}.{} failed: {}", apiName, operationName, 
+                            e.getMessage());
+                    throw new RuntimeException(e);
+                }
+            });
+        } catch (Exception e) {
+            log.error("Failed to execute {}.{} after {} retries", apiName, operationName, 
+                    maxAttempts, e);
+            
+            // Handle failure based on strategy
+            if (failureStrategy == FailureStrategy.PUBLISH_TO_SQS) {
+                FailedOperationMessage message = new FailedOperationMessage();
+                message.setOperationId(UUID.randomUUID().toString());
+                message.setOperationType(operationName);
+                message.setApiName(apiName);
+                message.setParameters(params);
+                message.setRetryCount(0);
+                
+                sqsService.publishFailedOperation(message);
+                log.info("Published failed operation {}.{} to SQS for later retry", 
+                        apiName, operationName);
+                return null;
+            } else {
+                // Default is to throw exception
+                throw new RuntimeException("Failed to execute " + apiName + "." + 
+                        operationName + " after " + maxAttempts + " retries", e);
+            }
+        }
+    }
+}
+
+/**
+ * Base class for operation executors to reduce boilerplate
+ */
+public abstract class BaseOperationExecutor implements OperationExecutor {
+    
+    private final String apiName;
+    private final String operationName;
+    
+    protected BaseOperationExecutor(String apiName, String operationName) {
+        this.apiName = apiName;
+        this.operationName = operationName;
+    }
+    
+    @Override
+    public String getApiName() {
+        return apiName;
+    }
+    
+    @Override
+    public String getOperationName() {
+        return operationName;
+    }
+}
+
+/**
+ * Implementation of PartyAPI.addParty executor
+ */
+@Component
+public class AddPartyExecutor extends BaseOperationExecutor {
+    
+    private final PartyAPI partyAPI;
+    
+    public AddPartyExecutor(PartyAPI partyAPI) {
+        super("PartyAPI", "addParty");
+        this.partyAPI = partyAPI;
+    }
+    
+    @Override
+    public Object execute(Map<String, Object> params) throws Exception {
+        String a = (String) params.get("a");
+        String b = (String) params.get("b");
+        String c = (String) params.get("c");
+        HttpClient httpClient = HttpClient.newHttpClient();
+        
+        CompletableFuture<Void> future = partyAPI.addParty(a, b, c, httpClient);
+        return future.get(); // Wait for completion since we're handling everything synchronously
+    }
+}
+
+/**
+ * Implementation of PartyAPI.updateParty executor
+ */
+@Component
+public class UpdatePartyExecutor extends BaseOperationExecutor {
+    
+    private final PartyAPI partyAPI;
+    
+    public UpdatePartyExecutor(PartyAPI partyAPI) {
+        super("PartyAPI", "updateParty");
+        this.partyAPI = partyAPI;
+    }
+    
+    @Override
+    public Object execute(Map<String, Object> params) throws Exception {
+        String c = (String) params.get("c");
+        String d = (String) params.get("d");
+        String e = (String) params.get("e");
+        HttpClient httpClient = HttpClient.newHttpClient();
+        
+        CompletableFuture<Void> future = partyAPI.updateParty(c, d, e, httpClient);
+        return future.get(); // Wait for completion
+    }
+}
+
+/**
+ * Implementation of PartyAPI.getParty executor
+ */
+@Component
+public class GetPartyExecutor extends BaseOperationExecutor {
+    
+    private final PartyAPI partyAPI;
+    
+    public GetPartyExecutor(PartyAPI partyAPI) {
+        super("PartyAPI", "getParty");
+        this.partyAPI = partyAPI;
+    }
+    
+    @Override
+    public Object execute(Map<String, Object> params) throws Exception {
+        String a = (String) params.get("a");
+        String d = (String) params.get("d");
+        HttpClient httpClient = HttpClient.newHttpClient();
+        
+        return partyAPI.getParty(a, d, httpClient);
+    }
+}
+
+/**
+ * Implementation of OrderAPI.addOrder executor
+ */
+@Component
+public class AddOrderExecutor extends BaseOperationExecutor {
+    
+    private final OrderAPI orderAPI;
+    
+    public AddOrderExecutor(OrderAPI orderAPI) {
+        super("OrderAPI", "addOrder");
+        this.orderAPI = orderAPI;
+    }
+    
+    @Override
+    public Object execute(Map<String, Object> params) throws Exception {
+        String j = (String) params.get("j");
+        String k = (String) params.get("k");
+        String l = (String) params.get("l");
+        HttpClient httpClient = HttpClient.newHttpClient();
+        
+        CompletableFuture<Void> future = orderAPI.addOrder(j, k, l, httpClient);
+        return future.get(); // Wait for completion
+    }
+}
+
+/**
+ * Implementation of OrderAPI.getOrder executor
+ */
+@Component
+public class GetOrderExecutor extends BaseOperationExecutor {
+    
+    private final OrderAPI orderAPI;
+    
+    public GetOrderExecutor(OrderAPI orderAPI) {
+        super("OrderAPI", "getOrder");
+        this.orderAPI = orderAPI;
+    }
+    
+    @Override
+    public Object execute(Map<String, Object> params) throws Exception {
+        String i = (String) params.get("i");
+        String k = (String) params.get("k");
+        HttpClient httpClient = HttpClient.newHttpClient();
+        
+        return orderAPI.getOrder(i, k, httpClient);
+    }
+}
+
+/**
+ * Registry to look up operation executors
+ */
+@Service
+public class OperationExecutorRegistry {
+    
+    private final Map<String, OperationExecutor> executors = new HashMap<>();
+    
+    @Autowired
+    public OperationExecutorRegistry(List<OperationExecutor> executorList) {
+        for (OperationExecutor executor : executorList) {
+            String key = executor.getApiName() + "." + executor.getOperationName();
+            executors.put(key, executor);
+        }
+    }
+    
+    public Optional<OperationExecutor> getExecutor(String apiName, String operationName) {
+        String key = apiName + "." + operationName;
+        return Optional.ofNullable(executors.get(key));
+    }
+}
+
+/**
+ * Wrapper for PartyAPI with retry capabilities
+ */
+@Service
+public class PartyAPIWithRetry {
+    
+    private final RetryService retryService;
+    private final OperationExecutorRegistry registry;
+    
+    @Value("${party.api.add.publish-to-sqs:true}")
+    private boolean addPartyShouldPublishToSqs;
+    
+    @Value("${party.api.update.publish-to-sqs:true}")
+    private boolean updatePartyShouldPublishToSqs;
+    
+    @Value("${party.api.get.publish-to-sqs:false}")
+    private boolean getPartyShouldPublishToSqs;
+    
+    public PartyAPIWithRetry(RetryService retryService, OperationExecutorRegistry registry) {
+        this.retryService = retryService;
+        this.registry = registry;
+    }
+    
+    public Object addParty(String a, String b, String c, HttpClient httpClient) {
+        String apiName = "PartyAPI";
+        String operationName = "addParty";
+        
+        Optional<OperationExecutor> executorOpt = registry.getExecutor(apiName, operationName);
+        
+        if (executorOpt.isEmpty()) {
+            throw new IllegalStateException("No executor found for " + apiName + "." + operationName);
+        }
+        
+        Map<String, Object> params = new HashMap<>();
+        params.put("a", a);
+        params.put("b", b);
+        params.put("c", c);
+        
+        FailureStrategy strategy = addPartyShouldPublishToSqs ? 
+                FailureStrategy.PUBLISH_TO_SQS : FailureStrategy.THROW_EXCEPTION;
+        
+        return retryService.executeWithRetry(executorOpt.get(), params, strategy);
+    }
+    
+    public Object updateParty(String c, String d, String e, HttpClient httpClient) {
+        String apiName = "PartyAPI";
+        String operationName = "updateParty";
+        
+        Optional<OperationExecutor> executorOpt = registry.getExecutor(apiName, operationName);
+        
+        if (executorOpt.isEmpty()) {
+            throw new IllegalStateException("No executor found for " + apiName + "." + operationName);
+        }
+        
+        Map<String, Object> params = new HashMap<>();
+        params.put("c", c);
+        params.put("d", d);
+        params.put("e", e);
+        
+        FailureStrategy strategy = updatePartyShouldPublishToSqs ? 
+                FailureStrategy.PUBLISH_TO_SQS : FailureStrategy.THROW_EXCEPTION;
+        
+        return retryService.executeWithRetry(executorOpt.get(), params, strategy);
+    }
+    
+    public Object getParty(String a, String d, HttpClient httpClient) {
+        String apiName = "PartyAPI";
+        String operationName = "getParty";
+        
+        Optional<OperationExecutor> executorOpt = registry.getExecutor(apiName, operationName);
+        
+        if (executorOpt.isEmpty()) {
+            throw new IllegalStateException("No executor found for " + apiName + "." + operationName);
+        }
+        
+        Map<String, Object> params = new HashMap<>();
+        params.put("a", a);
+        params.put("d", d);
+        
+        FailureStrategy strategy = getPartyShouldPublishToSqs ? 
+                FailureStrategy.PUBLISH_TO_SQS : FailureStrategy.THROW_EXCEPTION;
+        
+        return retryService.executeWithRetry(executorOpt.get(), params, strategy);
+    }
+}
+
+/**
+ * Wrapper for OrderAPI with retry capabilities
+ */
+@Service
+public class OrderAPIWithRetry {
+    
+    private final RetryService retryService;
+    private final OperationExecutorRegistry registry;
+    
+    @Value("${order.api.add.publish-to-sqs:true}")
+    private boolean addOrderShouldPublishToSqs;
+    
+    @Value("${order.api.get.publish-to-sqs:false}")
+    private boolean getOrderShouldPublishToSqs;
+    
+    public OrderAPIWithRetry(RetryService retryService, OperationExecutorRegistry registry) {
+        this.retryService = retryService;
+        this.registry = registry;
+    }
+    
+    public Object addOrder(String j, String k, String l, HttpClient httpClient) {
+        String apiName = "OrderAPI";
+        String operationName = "addOrder";
+        
+        Optional<OperationExecutor> executorOpt = registry.getExecutor(apiName, operationName);
+        
+        if (executorOpt.isEmpty()) {
+            throw new IllegalStateException("No executor found for " + apiName + "." + operationName);
+        }
+        
+        Map<String, Object> params = new HashMap<>();
+        params.put("j", j);
+        params.put("k", k);
+        params.put("l", l);
+        
+        FailureStrategy strategy = addOrderShouldPublishToSqs ? 
+                FailureStrategy.PUBLISH_TO_SQS : FailureStrategy.THROW_EXCEPTION;
+        
+        return retryService.executeWithRetry(executorOpt.get(), params, strategy);
+    }
+    
+    public Object getOrder(String i, String k, HttpClient httpClient) {
+        String apiName = "OrderAPI";
+        String operationName = "getOrder";
+        
+        Optional<OperationExecutor> executorOpt = registry.getExecutor(apiName, operationName);
+        
+        if (executorOpt.isEmpty()) {
+            throw new IllegalStateException("No executor found for " + apiName + "." + operationName);
+        }
+        
+        Map<String, Object> params = new HashMap<>();
+        params.put("i", i);
+        params.put("k", k);
+        
+        FailureStrategy strategy = getOrderShouldPublishToSqs ? 
+                FailureStrategy.PUBLISH_TO_SQS : FailureStrategy.THROW_EXCEPTION;
+        
+        return retryService.executeWithRetry(executorOpt.get(), params, strategy);
+    }
+}
+
+/**
+ * Annotation-based approach for defining operation executors
+ */
+@Configuration
+public class OperationExecutorConfig {
+    
+    @Retention(RetentionPolicy.RUNTIME)
+    @Target(ElementType.METHOD)
+    public @interface RetryableOperation {
+        String apiName();
+        String operationName();
+        boolean publishToSqs() default false;
+    }
+    
+    @Bean
+    public BeanPostProcessor operationExecutorBeanPostProcessor(ApplicationContext context) {
+        return new BeanPostProcessor() {
+            @Override
+            public Object postProcessBeforeInitialization(Object bean, String beanName) throws BeansException {
+                return bean;
+            }
+            
+            @Override
+            public Object postProcessAfterInitialization(Object bean, String beanName) throws BeansException {
+                Class<?> beanClass = bean.getClass();
+                
+                for (Method method : beanClass.getMethods()) {
+                    RetryableOperation annotation = method.getAnnotation(RetryableOperation.class);
+                    
+                    if (annotation != null) {
+                        registerOperationExecutor(context, bean, method, annotation);
+                    }
+                }
+                
+                return bean;
+            }
+            
+            private void registerOperationExecutor(
+                    ApplicationContext context,
+                    Object bean,
+                    Method method,
+                    RetryableOperation annotation) {
+                
+                String apiName = annotation.apiName();
+                String operationName = annotation.operationName();
+                
+                OperationExecutor executor = new BaseOperationExecutor(apiName, operationName) {
+                    @Override
+                    public Object execute(Map<String, Object> params) throws Exception {
+                        Parameter[] parameters = method.getParameters();
+                        Object[] args = new Object[parameters.length];
+                        
+                        for (int i = 0; i < parameters.length; i++) {
+                            Parameter param = parameters[i];
+                            String paramName = param.getName();
+                            
+                            if (params.containsKey(paramName)) {
+                                args[i] = convertType(params.get(paramName), param.getType());
+                            } else if (param.getType().equals(HttpClient.class)) {
+                                args[i] = HttpClient.newHttpClient();
+                            } else {
+                                throw new IllegalArgumentException("Missing parameter: " + paramName);
+                            }
+                        }
+                        
+                        Object result = method.invoke(bean, args);
+                        
+                        if (result instanceof CompletableFuture) {
+                            return ((CompletableFuture<?>) result).get();
+                        }
+                        
+                        return result;
+                    }
+                    
+                    @SuppressWarnings("unchecked")
+                    private <T> T convertType(Object value, Class<T> targetType) {
+                        if (value == null) {
+                            return null;
+                        }
+                        
+                        if (targetType.isAssignableFrom(value.getClass())) {
+                            return (T) value;
+                        }
+                        
+                        // Add more conversions as needed
+                        if (targetType.equals(Integer.class) && value instanceof String) {
+                            return (T) Integer.valueOf((String) value);
+                        }
+                        
+                        throw new IllegalArgumentException(
+                                "Cannot convert " + value.getClass() + " to " + targetType);
+                    }
+                };
+                
+                // Register the executor
+                ((DefaultListableBeanFactory) context.getAutowireCapableBeanFactory())
+                        .registerSingleton(
+                                apiName + operationName + "Executor", 
+                                executor);
+            }
+        };
+    }
+}
+
+/**
+ * Even simpler API facade using annotations for configuration
+ */
+@Service
+public class AnnotatedAPI {
+    
+    private final PartyAPI partyAPI;
+    private final OrderAPI orderAPI;
+    private final RetryService retryService;
+    private final OperationExecutorRegistry registry;
+    
+    public AnnotatedAPI(
+            PartyAPI partyAPI, 
+            OrderAPI orderAPI,
+            RetryService retryService,
+            OperationExecutorRegistry registry) {
+        this.partyAPI = partyAPI;
+        this.orderAPI = orderAPI;
+        this.retryService = retryService;
+        this.registry = registry;
+    }
+    
+    @RetryableOperation(apiName = "PartyAPI", operationName = "addParty", publishToSqs = true)
+    public Object addParty(String a, String b, String c, HttpClient httpClient) {
+        try {
+            CompletableFuture<Void> future = partyAPI.addParty(a, b, c, httpClient);
+            return future.get();
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+    }
+    
+    @RetryableOperation(apiName = "PartyAPI", operationName = "updateParty", publishToSqs = true)
+    public Object updateParty(String c, String d, String e, HttpClient httpClient) {
+        try {
+            CompletableFuture<Void> future = partyAPI.updateParty(c, d, e, httpClient);
+            return future.get();
+        } catch (Exception ex) {
+            throw new RuntimeException(ex);
+        }
+    }
+    
+    @RetryableOperation(apiName = "PartyAPI", operationName = "getParty", publishToSqs = false)
+    public Object getParty(String a, String d, HttpClient httpClient) {
+        return partyAPI.getParty(a, d, httpClient);
+    }
+    
+    @RetryableOperation(apiName = "OrderAPI", operationName = "addOrder", publishToSqs = true)
+    public Object addOrder(String j, String k, String l, HttpClient httpClient) {
+        try {
+            CompletableFuture<Void> future = orderAPI.addOrder(j, k, l, httpClient);
+            return future.get();
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+    }
+    
+    @RetryableOperation(apiName = "OrderAPI", operationName = "getOrder", publishToSqs = false)
+    public Object getOrder(String i, String k, HttpClient httpClient) {
+        return orderAPI.getOrder(i, k, httpClient);
+    }
+    
+    /**
+     * Generic method to execute any operation with proper retry handling
+     */
+    public Object execute(String apiName, String operationName, Map<String, Object> params, boolean publishToSqs) {
+        Optional<OperationExecutor> executorOpt = registry.getExecutor(apiName, operationName);
+        
+        if (executorOpt.isEmpty()) {
+            throw new IllegalStateException("No executor found for " + apiName + "." + operationName);
+        }
+        
+        FailureStrategy strategy = publishToSqs ? 
+                FailureStrategy.PUBLISH_TO_SQS : FailureStrategy.THROW_EXCEPTION;
+        
+        return retryService.executeWithRetry(executorOpt.get(), params, strategy);
+    }
+}
+
+/**
+ * Scheduler to process failed operations from SQS
+ */
+@Component
+@Slf4j
+public class FailedOperationsScheduler {
+
+    private final SqsService sqsService;
+    private final OperationExecutorRegistry registry;
+    private final RetryTemplate retryTemplate;
+    
+    @Value("${scheduler.retry.enabled:true}")
+    private boolean retryEnabled;
+    
+    public FailedOperationsScheduler(
+            SqsService sqsService, 
+            OperationExecutorRegistry registry,
+            RetryTemplate retryTemplate) {
+        this.sqsService = sqsService;
+        this.registry = registry;
+        this.retryTemplate = retryTemplate;
+    }
+    
+    @Scheduled(fixedDelayString = "${scheduler.retry.intervalMs:60000}")
+    public void processFailedOperations() {
+        if (!retryEnabled) {
+            return;
+        }
+        
+        Optional<FailedOperationMessage> messageOpt = sqsService.receiveMessage();
+        
+        if (messageOpt.isEmpty()) {
+            return;
+        }
+        
+        FailedOperationMessage message = messageOpt.get();
+        boolean success = false;
+        
+        try {
+            success = processMessage(message);
+        } catch (Exception e) {
+            log.error("Failed to process operation: {}", message.getOperationId(), e);
+        }
+        
+        if (success) {
+            sqsService.deleteMessage(message.getReceiptHandle());
+        }
+    }
+    
+    private boolean processMessage(FailedOperationMessage message) {
+        String apiName = message.getApiName();
+        String operationType = message.getOperationType();
+        
+        Optional<OperationExecutor> executorOpt = registry.getExecutor(apiName, operationType);
+        
+        if (executorOpt.isEmpty()) {
+            log.error("No executor found for operation {}.{}", apiName, operationType);
+            return false;
+        }
+        
+        OperationExecutor executor = executorOpt.get();
+        
+        try {
+            return retryTemplate.execute(retryContext -> {
+                try {
+                    executor.execute(message.getParameters());
+                    return true;
+                } catch (Exception e) {
+                    log.warn("Retry attempt for {}.{} failed", apiName, operationType, e);
+                    throw new RuntimeException(e);
+                }
+            });
+        } catch (Exception e) {
+            log.error("Failed to execute {}.{} after retries", apiName, operationType, e);
+            return false;
+        }
+    }
+}
+
+/**
+ * Configuration for application.properties
+ */
+// application.properties
+// api.retry.maxAttempts=5
+// api.retry.initialBackoffMs=1000
+// api.retry.maxBackoffMs=30000
+// api.retry.multiplier=2
+// 
+// # Configure which operations publish to SQS on failure
+// party.api.add.publish-to-sqs=true
+// party.api.update.publish-to-sqs=true
+// party.api.get.publish-to-sqs=false
+// order.api.add.publish-to-sqs=true
+// order.api.get.publish-to-sqs=false
+// 
+// aws.region=us-east-1
+// aws.accessKey=your-access-key
+// aws.secretKey=your-secret-key
+// aws.sqs.queue.url=https://sqs.us-east-1.amazonaws.com/123456789012/failed-operations-queue
+// 
+// scheduler.retry.enabled=true
+// scheduler.retry.intervalMs=60000
