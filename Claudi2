@@ -1,0 +1,619 @@
+/**
+ * Interface for operation handlers that can retry specific operations
+ */
+public interface OperationHandler {
+    /**
+     * Checks if this handler can process the given operation
+     */
+    boolean canHandle(String apiName, String operationType);
+    
+    /**
+     * Executes the operation with the provided parameters
+     */
+    boolean executeOperation(Map<String, Object> params) throws Exception;
+}
+
+/**
+ * Registry that automatically collects all operation handlers
+ */
+@Service
+@Slf4j
+public class OperationHandlerRegistry {
+    
+    private final List<OperationHandler> handlers;
+    
+    @Autowired
+    public OperationHandlerRegistry(List<OperationHandler> handlers) {
+        this.handlers = handlers;
+    }
+    
+    public Optional<OperationHandler> getHandler(String apiName, String operationType) {
+        return handlers.stream()
+                .filter(handler -> handler.canHandle(apiName, operationType))
+                .findFirst();
+    }
+}
+
+/**
+ * Implementation of an operation handler for PartyAPI.addParty
+ */
+@Component
+@Slf4j
+public class AddPartyOperationHandler implements OperationHandler {
+    
+    private final PartyAPI partyAPI;
+    
+    public AddPartyOperationHandler(PartyAPI partyAPI) {
+        this.partyAPI = partyAPI;
+    }
+    
+    @Override
+    public boolean canHandle(String apiName, String operationType) {
+        return "PartyAPI".equals(apiName) && "addParty".equals(operationType);
+    }
+    
+    @Override
+    public boolean executeOperation(Map<String, Object> params) throws Exception {
+        String a = (String) params.get("a");
+        String b = (String) params.get("b");
+        String c = (String) params.get("c");
+        HttpClient httpClient = HttpClient.newHttpClient();
+        
+        CompletableFuture<Void> future = partyAPI.addParty(a, b, c, httpClient);
+        future.get(); // Wait for completion
+        return true;
+    }
+}
+
+/**
+ * Implementation of an operation handler for PartyAPI.updateParty
+ */
+@Component
+@Slf4j
+public class UpdatePartyOperationHandler implements OperationHandler {
+    
+    private final PartyAPI partyAPI;
+    
+    public UpdatePartyOperationHandler(PartyAPI partyAPI) {
+        this.partyAPI = partyAPI;
+    }
+    
+    @Override
+    public boolean canHandle(String apiName, String operationType) {
+        return "PartyAPI".equals(apiName) && "updateParty".equals(operationType);
+    }
+    
+    @Override
+    public boolean executeOperation(Map<String, Object> params) throws Exception {
+        String c = (String) params.get("c");
+        String d = (String) params.get("d");
+        String e = (String) params.get("e");
+        HttpClient httpClient = HttpClient.newHttpClient();
+        
+        CompletableFuture<Void> future = partyAPI.updateParty(c, d, e, httpClient);
+        future.get(); // Wait for completion
+        return true;
+    }
+}
+
+/**
+ * Implementation of an operation handler for OrderAPI.addOrder
+ */
+@Component
+@Slf4j
+public class AddOrderOperationHandler implements OperationHandler {
+    
+    private final OrderAPI orderAPI;
+    
+    public AddOrderOperationHandler(OrderAPI orderAPI) {
+        this.orderAPI = orderAPI;
+    }
+    
+    @Override
+    public boolean canHandle(String apiName, String operationType) {
+        return "OrderAPI".equals(apiName) && "addOrder".equals(operationType);
+    }
+    
+    @Override
+    public boolean executeOperation(Map<String, Object> params) throws Exception {
+        String j = (String) params.get("j");
+        String k = (String) params.get("k");
+        String l = (String) params.get("l");
+        HttpClient httpClient = HttpClient.newHttpClient();
+        
+        CompletableFuture<Void> future = orderAPI.addOrder(j, k, l, httpClient);
+        future.get(); // Wait for completion
+        return true;
+    }
+}
+
+/**
+ * Base class for API retry operations that removes duplication
+ */
+@Slf4j
+public abstract class BaseApiWithRetry {
+    
+    protected final RetryTemplate retryTemplate;
+    protected final SqsService sqsService;
+    
+    public BaseApiWithRetry(RetryTemplate retryTemplate, SqsService sqsService) {
+        this.retryTemplate = retryTemplate;
+        this.sqsService = sqsService;
+    }
+    
+    protected <T> T executeWithRetry(Supplier<T> operation, String operationName) {
+        try {
+            return retryTemplate.execute(retryContext -> {
+                try {
+                    return operation.get();
+                } catch (Exception e) {
+                    log.warn("Retry attempt for {} failed", operationName, e);
+                    throw new RuntimeException(e);
+                }
+            });
+        } catch (Exception e) {
+            log.error("Failed to execute {} after retries", operationName, e);
+            throw new RuntimeException("Failed to execute " + operationName + " after multiple retries", e);
+        }
+    }
+    
+    protected <T> CompletableFuture<T> executeAsyncWithRetry(
+            Supplier<CompletableFuture<T>> operation,
+            String apiName,
+            String operationName,
+            Map<String, Object> params) {
+        
+        return CompletableFuture.supplyAsync(() -> {
+            try {
+                CompletableFuture<T> future = retryTemplate.execute(retryContext -> {
+                    try {
+                        return operation.get();
+                    } catch (Exception e) {
+                        log.warn("Retry attempt for {}.{} failed", apiName, operationName, e);
+                        throw new RuntimeException(e);
+                    }
+                });
+                
+                return future.get(); // Wait for the result
+            } catch (Exception e) {
+                log.error("Failed to execute {}.{} after retries", apiName, operationName, e);
+                
+                // Publish to SQS for later retry
+                FailedOperationMessage message = new FailedOperationMessage();
+                message.setOperationId(UUID.randomUUID().toString());
+                message.setOperationType(operationName);
+                message.setApiName(apiName);
+                message.setParameters(params);
+                message.setRetryCount(0);
+                
+                sqsService.publishFailedOperation(message);
+                return null;
+            }
+        });
+    }
+}
+
+/**
+ * Streamlined implementation of PartyAPIWithRetry using the base class
+ */
+@Service
+public class PartyAPIWithRetry extends BaseApiWithRetry {
+    
+    private final PartyAPI partyAPI;
+    
+    public PartyAPIWithRetry(RetryTemplate retryTemplate, SqsService sqsService, PartyAPI partyAPI) {
+        super(retryTemplate, sqsService);
+        this.partyAPI = partyAPI;
+    }
+    
+    public CompletableFuture<Void> addParty(String a, String b, String c, HttpClient httpClient) {
+        Map<String, Object> params = new HashMap<>();
+        params.put("a", a);
+        params.put("b", b);
+        params.put("c", c);
+        
+        return executeAsyncWithRetry(
+            () -> partyAPI.addParty(a, b, c, httpClient),
+            "PartyAPI",
+            "addParty",
+            params
+        );
+    }
+    
+    // Other methods follow the same pattern...
+}
+
+/**
+ * Improved scheduler that uses the registry to avoid conditionals
+ */
+@Component
+@Slf4j
+public class RegistryBasedFailedOperationsScheduler {
+
+    private final SqsService sqsService;
+    private final OperationHandlerRegistry handlerRegistry;
+    private final RetryTemplate retryTemplate;
+    
+    @Value("${scheduler.retry.enabled:true}")
+    private boolean retryEnabled;
+    
+    public RegistryBasedFailedOperationsScheduler(
+            SqsService sqsService, 
+            OperationHandlerRegistry handlerRegistry,
+            RetryTemplate retryTemplate) {
+        this.sqsService = sqsService;
+        this.handlerRegistry = handlerRegistry;
+        this.retryTemplate = retryTemplate;
+    }
+    
+    @Scheduled(fixedDelayString = "${scheduler.retry.intervalMs:60000}")
+    public void processFailedOperations() {
+        if (!retryEnabled) {
+            return;
+        }
+        
+        Optional<FailedOperationMessage> messageOpt = sqsService.receiveMessage();
+        
+        if (messageOpt.isEmpty()) {
+            return;
+        }
+        
+        FailedOperationMessage message = messageOpt.get();
+        boolean success = false;
+        
+        try {
+            success = processMessage(message);
+        } catch (Exception e) {
+            log.error("Failed to process operation: {}", message.getOperationId(), e);
+        }
+        
+        if (success) {
+            sqsService.deleteMessage(message.getReceiptHandle());
+        }
+    }
+    
+    private boolean processMessage(FailedOperationMessage message) {
+        String apiName = message.getApiName();
+        String operationType = message.getOperationType();
+        
+        Optional<OperationHandler> handlerOpt = handlerRegistry.getHandler(apiName, operationType);
+        
+        if (handlerOpt.isEmpty()) {
+            log.error("No handler found for operation {}.{}", apiName, operationType);
+            return false;
+        }
+        
+        OperationHandler handler = handlerOpt.get();
+        
+        try {
+            return retryTemplate.execute(retryContext -> {
+                try {
+                    return handler.executeOperation(message.getParameters());
+                } catch (Exception e) {
+                    log.warn("Retry attempt for {}.{} failed", apiName, operationType, e);
+                    throw new RuntimeException(e);
+                }
+            });
+        } catch (Exception e) {
+            log.error("Failed to execute {}.{} after retries", apiName, operationType, e);
+            return false;
+        }
+    }
+}
+
+/**
+ * Base class for operation handlers to reduce boilerplate
+ */
+@Slf4j
+public abstract class BaseOperationHandler implements OperationHandler {
+    
+    private final String apiName;
+    private final String operationType;
+    
+    protected BaseOperationHandler(String apiName, String operationType) {
+        this.apiName = apiName;
+        this.operationType = operationType;
+    }
+    
+    @Override
+    public boolean canHandle(String apiName, String operationType) {
+        return this.apiName.equals(apiName) && this.operationType.equals(operationType);
+    }
+}
+
+/**
+ * Factory to automatically generate operation handlers using annotations
+ */
+@Configuration
+public class OperationHandlerConfiguration {
+    
+    @Retention(RetentionPolicy.RUNTIME)
+    @Target(ElementType.METHOD)
+    public @interface RetryableOperation {
+        String apiName();
+        String operationType();
+    }
+    
+    @Bean
+    public BeanPostProcessor operationHandlerBeanPostProcessor(ApplicationContext context) {
+        return new BeanPostProcessor() {
+            @Override
+            public Object postProcessBeforeInitialization(Object bean, String beanName) throws BeansException {
+                return bean;
+            }
+            
+            @Override
+            public Object postProcessAfterInitialization(Object bean, String beanName) throws BeansException {
+                Class<?> beanClass = bean.getClass();
+                
+                for (Method method : beanClass.getMethods()) {
+                    RetryableOperation annotation = method.getAnnotation(RetryableOperation.class);
+                    
+                    if (annotation != null) {
+                        registerOperationHandler(context, bean, method, annotation);
+                    }
+                }
+                
+                return bean;
+            }
+            
+            private void registerOperationHandler(
+                    ApplicationContext context,
+                    Object bean,
+                    Method method,
+                    RetryableOperation annotation) {
+                
+                String apiName = annotation.apiName();
+                String operationType = annotation.operationType();
+                
+                OperationHandler handler = new BaseOperationHandler(apiName, operationType) {
+                    @Override
+                    public boolean executeOperation(Map<String, Object> params) throws Exception {
+                        Parameter[] parameters = method.getParameters();
+                        Object[] args = new Object[parameters.length];
+                        
+                        for (int i = 0; i < parameters.length; i++) {
+                            Parameter param = parameters[i];
+                            String paramName = param.getName();
+                            
+                            if (params.containsKey(paramName)) {
+                                args[i] = convertType(params.get(paramName), param.getType());
+                            } else if (param.getType().equals(HttpClient.class)) {
+                                args[i] = HttpClient.newHttpClient();
+                            } else {
+                                throw new IllegalArgumentException("Missing parameter: " + paramName);
+                            }
+                        }
+                        
+                        Object result = method.invoke(bean, args);
+                        
+                        if (result instanceof CompletableFuture) {
+                            ((CompletableFuture<?>) result).get();
+                        }
+                        
+                        return true;
+                    }
+                    
+                    @SuppressWarnings("unchecked")
+                    private <T> T convertType(Object value, Class<T> targetType) {
+                        if (value == null) {
+                            return null;
+                        }
+                        
+                        if (targetType.isAssignableFrom(value.getClass())) {
+                            return (T) value;
+                        }
+                        
+                        // Add more conversions as needed
+                        if (targetType.equals(Integer.class) && value instanceof String) {
+                            return (T) Integer.valueOf((String) value);
+                        }
+                        
+                        throw new IllegalArgumentException(
+                                "Cannot convert " + value.getClass() + " to " + targetType);
+                    }
+                };
+                
+                // Register the handler
+                ((DefaultListableBeanFactory) context.getAutowireCapableBeanFactory())
+                        .registerSingleton(
+                                apiName + operationType + "Handler", 
+                                handler);
+            }
+        };
+    }
+}
+
+/**
+ * Example of using annotations to define retryable operations
+ */
+@Service
+public class AnnotatedPartyAPI {
+    
+    private final PartyAPI partyAPI;
+    
+    public AnnotatedPartyAPI(PartyAPI partyAPI) {
+        this.partyAPI = partyAPI;
+    }
+    
+    @RetryableOperation(apiName = "PartyAPI", operationType = "addParty")
+    public CompletableFuture<Void> addParty(String a, String b, String c, HttpClient httpClient) {
+        return partyAPI.addParty(a, b, c, httpClient);
+    }
+    
+    @RetryableOperation(apiName = "PartyAPI", operationType = "updateParty")
+    public CompletableFuture<Void> updateParty(String c, String d, String e, HttpClient httpClient) {
+        return partyAPI.updateParty(c, d, e, httpClient);
+    }
+    
+    @RetryableOperation(apiName = "PartyAPI", operationType = "getParty")
+    public Object getParty(String a, String d, HttpClient httpClient) {
+        return partyAPI.getParty(a, d, httpClient);
+    }
+}
+
+/**
+ * Generic API adapter with automatic retry capabilities
+ */
+@Slf4j
+public class ApiAdapter<T> {
+    
+    private final T api;
+    private final RetryTemplate retryTemplate;
+    private final SqsService sqsService;
+    private final Class<T> apiClass;
+    private final String apiName;
+    
+    public ApiAdapter(T api, RetryTemplate retryTemplate, SqsService sqsService, Class<T> apiClass) {
+        this.api = api;
+        this.retryTemplate = retryTemplate;
+        this.sqsService = sqsService;
+        this.apiClass = apiClass;
+        this.apiName = apiClass.getSimpleName();
+    }
+    
+    @SuppressWarnings("unchecked")
+    public T createRetryableProxy() {
+        return (T) Proxy.newProxyInstance(
+                apiClass.getClassLoader(),
+                new Class<?>[] { apiClass },
+                (proxy, method, args) -> {
+                    String methodName = method.getName();
+                    
+                    // Create parameters map for SQS in case of failure
+                    Map<String, Object> params = new HashMap<>();
+                    Parameter[] parameters = method.getParameters();
+                    for (int i = 0; i < parameters.length; i++) {
+                        // Skip HttpClient parameters
+                        if (!parameters[i].getType().equals(HttpClient.class)) {
+                            params.put(parameters[i].getName(), args[i]);
+                        }
+                    }
+                    
+                    // Check if method returns CompletableFuture (async)
+                    if (CompletableFuture.class.isAssignableFrom(method.getReturnType())) {
+                        return executeAsyncWithRetry(() -> {
+                            try {
+                                return (CompletableFuture<?>) method.invoke(api, args);
+                            } catch (Exception e) {
+                                throw new RuntimeException(e);
+                            }
+                        }, apiName, methodName, params);
+                    } else {
+                        // Synchronous method
+                        return executeWithRetry(() -> {
+                            try {
+                                return method.invoke(api, args);
+                            } catch (Exception e) {
+                                throw new RuntimeException(e);
+                            }
+                        }, methodName);
+                    }
+                });
+    }
+    
+    private <R> R executeWithRetry(Supplier<R> operation, String operationName) {
+        try {
+            return retryTemplate.execute(retryContext -> {
+                try {
+                    return operation.get();
+                } catch (Exception e) {
+                    log.warn("Retry attempt for {} failed", operationName, e);
+                    throw new RuntimeException(e);
+                }
+            });
+        } catch (Exception e) {
+            log.error("Failed to execute {} after retries", operationName, e);
+            throw new RuntimeException("Failed to execute " + operationName + " after multiple retries", e);
+        }
+    }
+    
+    private <R> CompletableFuture<R> executeAsyncWithRetry(
+            Supplier<CompletableFuture<R>> operation,
+            String apiName,
+            String operationName,
+            Map<String, Object> params) {
+        
+        return CompletableFuture.supplyAsync(() -> {
+            try {
+                CompletableFuture<R> future = retryTemplate.execute(retryContext -> {
+                    try {
+                        return operation.get();
+                    } catch (Exception e) {
+                        log.warn("Retry attempt for {}.{} failed", apiName, operationName, e);
+                        throw new RuntimeException(e);
+                    }
+                });
+                
+                return future.get(); // Wait for the result
+            } catch (Exception e) {
+                log.error("Failed to execute {}.{} after retries", apiName, operationName, e);
+                
+                // Publish to SQS for later retry
+                FailedOperationMessage message = new FailedOperationMessage();
+                message.setOperationId(UUID.randomUUID().toString());
+                message.setOperationType(operationName);
+                message.setApiName(apiName);
+                message.setParameters(params);
+                message.setRetryCount(0);
+                
+                sqsService.publishFailedOperation(message);
+                return null;
+            }
+        });
+    }
+}
+
+/**
+ * Configuration to automatically create retryable proxies for all APIs
+ */
+@Configuration
+public class RetryableApiConfiguration {
+    
+    @Bean
+    public PartyAPIWithRetry partyAPIWithRetry(PartyAPI partyAPI, RetryTemplate retryTemplate, SqsService sqsService) {
+        ApiAdapter<PartyAPI> adapter = new ApiAdapter<>(partyAPI, retryTemplate, sqsService, PartyAPI.class);
+        return new PartyAPIWithRetry(adapter.createRetryableProxy(), retryTemplate, sqsService);
+    }
+    
+    @Bean
+    public OrderAPIWithRetry orderAPIWithRetry(OrderAPI orderAPI, RetryTemplate retryTemplate, SqsService sqsService) {
+        ApiAdapter<OrderAPI> adapter = new ApiAdapter<>(orderAPI, retryTemplate, sqsService, OrderAPI.class);
+        return new OrderAPIWithRetry(adapter.createRetryableProxy(), retryTemplate, sqsService);
+    }
+    
+    // This bean factory method automatically creates adapters for any API
+    @Bean
+    public BeanPostProcessor apiAdapterBeanPostProcessor(RetryTemplate retryTemplate, SqsService sqsService) {
+        return new BeanPostProcessor() {
+            @Override
+            public Object postProcessBeforeInitialization(Object bean, String beanName) throws BeansException {
+                return bean;
+            }
+            
+            @Override
+            public Object postProcessAfterInitialization(Object bean, String beanName) throws BeansException {
+                if (bean.getClass().getName().endsWith("API") && 
+                        !bean.getClass().getName().contains("WithRetry")) {
+                    // This is an API bean, create an adapter for it
+                    log.info("Creating retryable proxy for API: {}", bean.getClass().getName());
+                    
+                    try {
+                        @SuppressWarnings("unchecked")
+                        ApiAdapter<?> adapter = new ApiAdapter<>(
+                                bean, 
+                                retryTemplate, 
+                                sqsService, 
+                                (Class<?>) bean.getClass());
+                        
+                        return adapter.createRetryableProxy();
+                    } catch (Exception e) {
+                        log.error("Failed to create adapter for {}", bean.getClass().getName(), e);
+                    }
+                }
+                
+                return bean;
+            }
+        };
+    }
+}
