@@ -1,0 +1,363 @@
+/**
+ * Annotation to mark methods that should have retry capability
+ */
+@Retention(RetentionPolicy.RUNTIME)
+@Target(ElementType.METHOD)
+public @interface Retryable {
+    /**
+     * API name for identification in failure queue
+     */
+    String apiName();
+    
+    /**
+     * Operation type for identification in failure queue
+     */
+    String operationType();
+    
+    /**
+     * Whether the operation is asynchronous (CompletableFuture)
+     * If true, failed operations will be sent to SQS after retries
+     * If false, exceptions will be thrown after retries
+     */
+    boolean async() default true;
+    
+    /**
+     * Maximum number of immediate retries before giving up or sending to SQS
+     */
+    int maxRetries() default 5;
+}
+
+/**
+ * Message format for failed operations stored in SQS
+ */
+@Data
+public class FailedOperationMessage {
+    private String operationId;
+    private String apiName;
+    private String operationType;
+    private Map<String, Object> parameters;
+    private int retryCount;
+    private String receiptHandle;
+}
+
+/**
+ * Configuration for retry template with exponential backoff
+ */
+@Configuration
+public class RetryConfiguration {
+    
+    @Bean
+    public RetryTemplate retryTemplate() {
+        ExponentialBackOffPolicy backOffPolicy = new ExponentialBackOffPolicy();
+        backOffPolicy.setInitialInterval(100);
+        backOffPolicy.setMultiplier(2.0);
+        backOffPolicy.setMaxInterval(2000);
+        
+        SimpleRetryPolicy retryPolicy = new SimpleRetryPolicy(5);
+        
+        RetryTemplate retryTemplate = new RetryTemplate();
+        retryTemplate.setBackOffPolicy(backOffPolicy);
+        retryTemplate.setRetryPolicy(retryPolicy);
+        
+        return retryTemplate;
+    }
+}
+
+/**
+ * Aspect that intercepts calls to methods annotated with @Retryable
+ */
+@Aspect
+@Component
+@Slf4j
+public class RetryableOperationAspect {
+    
+    private final RetryTemplate retryTemplate;
+    private final SqsService sqsService;
+    
+    public RetryableOperationAspect(RetryTemplate retryTemplate, SqsService sqsService) {
+        this.retryTemplate = retryTemplate;
+        this.sqsService = sqsService;
+    }
+    
+    @Around("@annotation(retryable)")
+    public Object aroundRetryableMethod(ProceedingJoinPoint joinPoint, Retryable retryable) throws Throwable {
+        String apiName = retryable.apiName();
+        String operationType = retryable.operationType();
+        boolean isAsync = retryable.async();
+        
+        // Create parameters map for SQS in case of failure
+        Map<String, Object> params = extractParameters(joinPoint);
+        
+        if (isAsync) {
+            return handleAsyncMethod(joinPoint, apiName, operationType, params);
+        } else {
+            return handleSyncMethod(joinPoint, apiName, operationType);
+        }
+    }
+    
+    private Object handleSyncMethod(ProceedingJoinPoint joinPoint, String apiName, String operationType) throws Throwable {
+        try {
+            return retryTemplate.execute(retryContext -> {
+                try {
+                    return joinPoint.proceed();
+                } catch (Throwable e) {
+                    log.warn("Retry attempt for {}.{} failed", apiName, operationType, e);
+                    throw new RetryableException("Operation failed", e);
+                }
+            });
+        } catch (RetryableException e) {
+            log.error("Failed to execute {}.{} after retries", apiName, operationType, e);
+            throw e.getCause();
+        }
+    }
+    
+    private Object handleAsyncMethod(
+            ProceedingJoinPoint joinPoint, 
+            String apiName, 
+            String operationType,
+            Map<String, Object> params) throws Throwable {
+        
+        return CompletableFuture.supplyAsync(() -> {
+            try {
+                CompletableFuture<?> future = (CompletableFuture<?>) retryTemplate.execute(retryContext -> {
+                    try {
+                        return joinPoint.proceed();
+                    } catch (Throwable e) {
+                        log.warn("Retry attempt for {}.{} failed", apiName, operationType, e);
+                        throw new RetryableException("Operation failed", e);
+                    }
+                });
+                
+                return future.get(); // Wait for the result
+            } catch (Exception e) {
+                log.error("Failed to execute {}.{} after retries", apiName, operationType, e);
+                
+                // Publish to SQS for later retry
+                FailedOperationMessage message = new FailedOperationMessage();
+                message.setOperationId(UUID.randomUUID().toString());
+                message.setOperationType(operationType);
+                message.setApiName(apiName);
+                message.setParameters(params);
+                message.setRetryCount(0);
+                
+                sqsService.publishFailedOperation(message);
+                return null;
+            }
+        });
+    }
+    
+    private Map<String, Object> extractParameters(ProceedingJoinPoint joinPoint) {
+        Map<String, Object> params = new HashMap<>();
+        MethodSignature signature = (MethodSignature) joinPoint.getSignature();
+        String[] parameterNames = signature.getParameterNames();
+        Object[] args = joinPoint.getArgs();
+        
+        for (int i = 0; i < parameterNames.length; i++) {
+            // Skip HttpClient parameters
+            if (!(args[i] instanceof HttpClient)) {
+                params.put(parameterNames[i], args[i]);
+            }
+        }
+        
+        return params;
+    }
+    
+    /**
+     * Custom exception to wrap the original exception
+     */
+    private static class RetryableException extends RuntimeException {
+        public RetryableException(String message, Throwable cause) {
+            super(message, cause);
+        }
+    }
+}
+
+/**
+ * Service that processes failed operations from SQS
+ */
+@Component
+@Slf4j
+public class FailedOperationProcessor {
+    
+    private final SqsService sqsService;
+    private final ApplicationContext applicationContext;
+    private final RetryTemplate retryTemplate;
+    
+    @Value("${scheduler.retry.enabled:true}")
+    private boolean retryEnabled;
+    
+    public FailedOperationProcessor(
+            SqsService sqsService, 
+            ApplicationContext applicationContext,
+            RetryTemplate retryTemplate) {
+        this.sqsService = sqsService;
+        this.applicationContext = applicationContext;
+        this.retryTemplate = retryTemplate;
+    }
+    
+    @Scheduled(fixedDelayString = "${scheduler.retry.intervalMs:60000}")
+    public void processFailedOperations() {
+        if (!retryEnabled) {
+            return;
+        }
+        
+        Optional<FailedOperationMessage> messageOpt = sqsService.receiveMessage();
+        
+        if (messageOpt.isEmpty()) {
+            return;
+        }
+        
+        FailedOperationMessage message = messageOpt.get();
+        boolean success = false;
+        
+        try {
+            success = processMessage(message);
+        } catch (Exception e) {
+            log.error("Failed to process operation: {}", message.getOperationId(), e);
+        }
+        
+        if (success) {
+            sqsService.deleteMessage(message.getReceiptHandle());
+        }
+    }
+    
+    private boolean processMessage(FailedOperationMessage message) {
+        Map<String, Object> beans = applicationContext.getBeansWithAnnotation(Service.class);
+        
+        for (Object bean : beans.values()) {
+            for (Method method : bean.getClass().getMethods()) {
+                Retryable annotation = method.getAnnotation(Retryable.class);
+                
+                if (annotation != null && 
+                    annotation.apiName().equals(message.getApiName()) && 
+                    annotation.operationType().equals(message.getOperationType())) {
+                    
+                    return invokeMethod(bean, method, message.getParameters());
+                }
+            }
+        }
+        
+        log.error("No handler found for operation {}.{}", 
+                 message.getApiName(), message.getOperationType());
+        return false;
+    }
+    
+    private boolean invokeMethod(Object bean, Method method, Map<String, Object> params) {
+        try {
+            return retryTemplate.execute(retryContext -> {
+                try {
+                    Object[] args = prepareArguments(method, params);
+                    Object result = method.invoke(bean, args);
+                    
+                    if (result instanceof CompletableFuture) {
+                        ((CompletableFuture<?>) result).get();
+                    }
+                    
+                    return true;
+                } catch (Exception e) {
+                    log.warn("Retry attempt failed", e);
+                    throw new RuntimeException(e);
+                }
+            });
+        } catch (Exception e) {
+            log.error("Failed to execute after retries", e);
+            return false;
+        }
+    }
+    
+    private Object[] prepareArguments(Method method, Map<String, Object> params) {
+        Parameter[] parameters = method.getParameters();
+        Object[] args = new Object[parameters.length];
+        
+        for (int i = 0; i < parameters.length; i++) {
+            Parameter param = parameters[i];
+            String paramName = param.getName();
+            
+            if (params.containsKey(paramName)) {
+                args[i] = convertType(params.get(paramName), param.getType());
+            } else if (param.getType().equals(HttpClient.class)) {
+                args[i] = HttpClient.newHttpClient();
+            } else {
+                throw new IllegalArgumentException("Missing parameter: " + paramName);
+            }
+        }
+        
+        return args;
+    }
+    
+    @SuppressWarnings("unchecked")
+    private <T> T convertType(Object value, Class<T> targetType) {
+        if (value == null) {
+            return null;
+        }
+        
+        if (targetType.isAssignableFrom(value.getClass())) {
+            return (T) value;
+        }
+        
+        // Add more conversions as needed
+        if (targetType.equals(Integer.class) && value instanceof String) {
+            return (T) Integer.valueOf((String) value);
+        }
+        
+        throw new IllegalArgumentException(
+                "Cannot convert " + value.getClass() + " to " + targetType);
+    }
+}
+
+
+/**
+ * Example PartyAPI implementation with retryable operations
+ */
+@Service
+public class PartyAPIImpl implements PartyAPI {
+    
+    @Retryable(apiName = "PartyAPI", operationType = "addParty", async = true)
+    @Override
+    public CompletableFuture<Void> addParty(String a, String b, String c, HttpClient httpClient) {
+        // Original implementation
+        return CompletableFuture.runAsync(() -> {
+            // API call logic here
+        });
+    }
+    
+    @Retryable(apiName = "PartyAPI", operationType = "updateParty", async = true)
+    @Override
+    public CompletableFuture<Void> updateParty(String c, String d, String e, HttpClient httpClient) {
+        // Original implementation
+        return CompletableFuture.runAsync(() -> {
+            // API call logic here
+        });
+    }
+    
+    @Retryable(apiName = "PartyAPI", operationType = "getParty", async = false)
+    @Override
+    public Object getParty(String a, String d, HttpClient httpClient) {
+        // Original implementation
+        // For synchronous methods, exceptions will be thrown after retries
+        return new Object();
+    }
+}
+
+/**
+ * Example OrderAPI implementation with retryable operations
+ */
+@Service
+public class OrderAPIImpl implements OrderAPI {
+    
+    @Retryable(apiName = "OrderAPI", operationType = "addOrder", async = true)
+    @Override
+    public CompletableFuture<Void> addOrder(String j, String k, String l, HttpClient httpClient) {
+        // Original implementation
+        return CompletableFuture.runAsync(() -> {
+            // API call logic here
+        });
+    }
+    
+    @Retryable(apiName = "OrderAPI", operationType = "getOrder", async = false)
+    @Override
+    public Object getOrder(String i, String k, HttpClient httpClient) {
+        // Original implementation
+        return new Object();
+    }
+}
