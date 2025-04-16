@@ -361,3 +361,50 @@ public class OrderAPIImpl implements OrderAPI {
         return new Object();
     }
 }
+
+
+@Service
+public class PartyService {
+    
+    private final PartyAPI partyAPI;
+    private final HttpClient httpClient;
+    
+    @Autowired
+    public PartyService(PartyAPI partyAPI) {
+        this.partyAPI = partyAPI;
+        this.httpClient = HttpClient.newHttpClient();
+    }
+    
+    public void processPartyUpdate(String partyId, String updateData, String additionalInfo) {
+        // Some business logic before the update
+        
+        // Call the updateParty method
+        CompletableFuture<Void> updateFuture = partyAPI.updateParty(partyId, updateData, additionalInfo, httpClient);
+        
+        // If you want to wait for the result (make the call synchronous)
+        try {
+            updateFuture.get(); // This blocks until the operation completes
+            // Process after successful update
+        } catch (InterruptedException | ExecutionException e) {
+            // Handle exceptions 
+            throw new RuntimeException("Failed to update party: " + partyId, e);
+        }
+        
+        // OR if you want to keep it asynchronous
+        updateFuture.thenRun(() -> {
+            // Code to execute after successful update
+            System.out.println("Party updated successfully: " + partyId);
+        }).exceptionally(ex -> {
+            // Handle exceptions
+            System.err.println("Failed to update party: " + partyId);
+            ex.printStackTrace();
+            return null;
+        });
+    }
+    
+    // Example of chaining multiple API calls
+    public CompletableFuture<Void> createAndUpdateParty(String a, String b, String c, String d, String e) {
+        return partyAPI.addParty(a, b, c, httpClient)
+                .thenCompose(result -> partyAPI.updateParty(c, d, e, httpClient));
+    }
+}
