@@ -1,0 +1,388 @@
+/**
+ * Retry configuration for API calls
+ */
+@Configuration
+public class RetryConfig {
+
+    @Value("${api.retry.maxAttempts:5}")
+    private int maxAttempts;
+
+    @Value("${api.retry.initialBackoffMs:1000}")
+    private long initialBackoffMs;
+
+    @Value("${api.retry.maxBackoffMs:30000}")
+    private long maxBackoffMs;
+
+    @Value("${api.retry.multiplier:2}")
+    private double multiplier;
+    
+    @Bean
+    public RetryTemplate retryTemplate() {
+        ExponentialBackOffPolicy backOffPolicy = new ExponentialBackOffPolicy();
+        backOffPolicy.setInitialInterval(initialBackoffMs);
+        backOffPolicy.setMaxInterval(maxBackoffMs);
+        backOffPolicy.setMultiplier(multiplier);
+
+        SimpleRetryPolicy retryPolicy = new SimpleRetryPolicy();
+        retryPolicy.setMaxAttempts(maxAttempts);
+
+        RetryTemplate template = new RetryTemplate();
+        template.setBackOffPolicy(backOffPolicy);
+        template.setRetryPolicy(retryPolicy);
+        
+        return template;
+    }
+}
+
+/**
+ * Service to handle SQS operations for failed async requests
+ */
+@Service
+@Slf4j
+public class SqsService {
+
+    @Value("${aws.sqs.queue.url}")
+    private String queueUrl;
+    
+    private final AmazonSQS sqsClient;
+    private final ObjectMapper objectMapper;
+    
+    public SqsService(AmazonSQS sqsClient, ObjectMapper objectMapper) {
+        this.sqsClient = sqsClient;
+        this.objectMapper = objectMapper;
+    }
+    
+    public void publishFailedOperation(FailedOperationMessage message) {
+        try {
+            String messageBody = objectMapper.writeValueAsString(message);
+            SendMessageRequest request = new SendMessageRequest()
+                    .withQueueUrl(queueUrl)
+                    .withMessageBody(messageBody);
+            
+            sqsClient.sendMessage(request);
+            log.info("Published failed operation to SQS: {}", message.getOperationId());
+        } catch (Exception e) {
+            log.error("Failed to publish message to SQS", e);
+        }
+    }
+    
+    public Optional<FailedOperationMessage> receiveMessage() {
+        try {
+            ReceiveMessageRequest request = new ReceiveMessageRequest()
+                    .withQueueUrl(queueUrl)
+                    .withMaxNumberOfMessages(1)
+                    .withVisibilityTimeout(30)
+                    .withWaitTimeSeconds(10);
+            
+            List<Message> messages = sqsClient.receiveMessage(request).getMessages();
+            
+            if (messages.isEmpty()) {
+                return Optional.empty();
+            }
+            
+            Message message = messages.get(0);
+            FailedOperationMessage operationMessage = objectMapper.readValue(
+                    message.getBody(), FailedOperationMessage.class);
+            operationMessage.setReceiptHandle(message.getReceiptHandle());
+            
+            return Optional.of(operationMessage);
+        } catch (Exception e) {
+            log.error("Error receiving message from SQS", e);
+            return Optional.empty();
+        }
+    }
+    
+    public void deleteMessage(String receiptHandle) {
+        try {
+            sqsClient.deleteMessage(queueUrl, receiptHandle);
+            log.info("Deleted message from SQS: {}", receiptHandle);
+        } catch (Exception e) {
+            log.error("Failed to delete message from SQS", e);
+        }
+    }
+}
+
+/**
+ * Model for storing failed operation details
+ */
+@Data
+@NoArgsConstructor
+@AllArgsConstructor
+public class FailedOperationMessage {
+    private String operationId;
+    private String operationType;
+    private String apiName;
+    private Map<String, Object> parameters;
+    private String receiptHandle;
+    private int retryCount;
+}
+
+/**
+ * Modified PartyAPI with retry mechanism
+ */
+@Service
+@Slf4j
+public class PartyAPIWithRetry {
+
+    private final RetryTemplate retryTemplate;
+    private final SqsService sqsService;
+    private final PartyAPI partyAPI;
+    
+    public PartyAPIWithRetry(RetryTemplate retryTemplate, SqsService sqsService, PartyAPI partyAPI) {
+        this.retryTemplate = retryTemplate;
+        this.sqsService = sqsService;
+        this.partyAPI = partyAPI;
+    }
+    
+    public CompletableFuture<Void> addParty(String a, String b, String c, HttpClient httpClient) {
+        return CompletableFuture.supplyAsync(() -> {
+            try {
+                return retryTemplate.execute(retryContext -> partyAPI.addParty(a, b, c, httpClient));
+            } catch (Exception e) {
+                log.error("Failed to add party after retries", e);
+                
+                FailedOperationMessage message = new FailedOperationMessage();
+                message.setOperationId(UUID.randomUUID().toString());
+                message.setOperationType("addParty");
+                message.setApiName("PartyAPI");
+                message.setParameters(Map.of(
+                    "a", a,
+                    "b", b,
+                    "c", c
+                ));
+                message.setRetryCount(0);
+                
+                sqsService.publishFailedOperation(message);
+                return null;
+            }
+        });
+    }
+    
+    public CompletableFuture<Void> updateParty(String c, String d, String e, HttpClient httpClient) {
+        return CompletableFuture.supplyAsync(() -> {
+            try {
+                return retryTemplate.execute(retryContext -> partyAPI.updateParty(c, d, e, httpClient));
+            } catch (Exception ex) {
+                log.error("Failed to update party after retries", ex);
+                
+                FailedOperationMessage message = new FailedOperationMessage();
+                message.setOperationId(UUID.randomUUID().toString());
+                message.setOperationType("updateParty");
+                message.setApiName("PartyAPI");
+                message.setParameters(Map.of(
+                    "c", c,
+                    "d", d,
+                    "e", e
+                ));
+                message.setRetryCount(0);
+                
+                sqsService.publishFailedOperation(message);
+                return null;
+            }
+        });
+    }
+    
+    public Object getParty(String a, String d, HttpClient httpClient) {
+        try {
+            return retryTemplate.execute(retryContext -> partyAPI.getParty(a, d, httpClient));
+        } catch (Exception e) {
+            log.error("Failed to get party after retries", e);
+            throw new RuntimeException("Failed to get party data after multiple retries", e);
+        }
+    }
+}
+
+/**
+ * Modified OrderAPI with retry mechanism
+ */
+@Service
+@Slf4j
+public class OrderAPIWithRetry {
+
+    private final RetryTemplate retryTemplate;
+    private final SqsService sqsService;
+    private final OrderAPI orderAPI;
+    
+    public OrderAPIWithRetry(RetryTemplate retryTemplate, SqsService sqsService, OrderAPI orderAPI) {
+        this.retryTemplate = retryTemplate;
+        this.sqsService = sqsService;
+        this.orderAPI = orderAPI;
+    }
+    
+    public CompletableFuture<Void> addOrder(String j, String k, String l, HttpClient httpClient) {
+        return CompletableFuture.supplyAsync(() -> {
+            try {
+                return retryTemplate.execute(retryContext -> orderAPI.addOrder(j, k, l, httpClient));
+            } catch (Exception e) {
+                log.error("Failed to add order after retries", e);
+                
+                FailedOperationMessage message = new FailedOperationMessage();
+                message.setOperationId(UUID.randomUUID().toString());
+                message.setOperationType("addOrder");
+                message.setApiName("OrderAPI");
+                message.setParameters(Map.of(
+                    "j", j,
+                    "k", k,
+                    "l", l
+                ));
+                message.setRetryCount(0);
+                
+                sqsService.publishFailedOperation(message);
+                return null;
+            }
+        });
+    }
+    
+    public Object getOrder(String i, String k, HttpClient httpClient) {
+        try {
+            return retryTemplate.execute(retryContext -> orderAPI.getOrder(i, k, httpClient));
+        } catch (Exception e) {
+            log.error("Failed to get order after retries", e);
+            throw new RuntimeException("Failed to get order data after multiple retries", e);
+        }
+    }
+}
+
+/**
+ * Scheduler to process failed operations from SQS
+ */
+@Component
+@Slf4j
+public class FailedOperationsScheduler {
+
+    private final SqsService sqsService;
+    private final PartyAPI partyAPI;
+    private final OrderAPI orderAPI;
+    private final RetryTemplate retryTemplate;
+    
+    @Value("${scheduler.retry.enabled:true}")
+    private boolean retryEnabled;
+    
+    public FailedOperationsScheduler(
+            SqsService sqsService, 
+            PartyAPI partyAPI, 
+            OrderAPI orderAPI,
+            RetryTemplate retryTemplate) {
+        this.sqsService = sqsService;
+        this.partyAPI = partyAPI;
+        this.orderAPI = orderAPI;
+        this.retryTemplate = retryTemplate;
+    }
+    
+    @Scheduled(fixedDelayString = "${scheduler.retry.intervalMs:60000}")
+    public void processFailedOperations() {
+        if (!retryEnabled) {
+            return;
+        }
+        
+        Optional<FailedOperationMessage> messageOpt = sqsService.receiveMessage();
+        
+        if (messageOpt.isEmpty()) {
+            return;
+        }
+        
+        FailedOperationMessage message = messageOpt.get();
+        boolean success = false;
+        
+        try {
+            success = retryOperation(message);
+        } catch (Exception e) {
+            log.error("Failed to process operation: {}", message.getOperationId(), e);
+        }
+        
+        if (success) {
+            sqsService.deleteMessage(message.getReceiptHandle());
+        }
+    }
+    
+    private boolean retryOperation(FailedOperationMessage message) {
+        String apiName = message.getApiName();
+        String operationType = message.getOperationType();
+        Map<String, Object> params = message.getParameters();
+        
+        try {
+            if ("PartyAPI".equals(apiName)) {
+                switch (operationType) {
+                    case "addParty":
+                        String a = (String) params.get("a");
+                        String b = (String) params.get("b");
+                        String c = (String) params.get("c");
+                        HttpClient httpClient = HttpClient.newHttpClient(); // Create a new client for retry
+                        
+                        CompletableFuture<Void> future = partyAPI.addParty(a, b, c, httpClient);
+                        future.get(); // Wait for completion
+                        return true;
+                        
+                    case "updateParty":
+                        String cParam = (String) params.get("c");
+                        String d = (String) params.get("d");
+                        String e = (String) params.get("e");
+                        HttpClient httpClient2 = HttpClient.newHttpClient();
+                        
+                        CompletableFuture<Void> future2 = partyAPI.updateParty(cParam, d, e, httpClient2);
+                        future2.get(); // Wait for completion
+                        return true;
+                }
+            } else if ("OrderAPI".equals(apiName)) {
+                if ("addOrder".equals(operationType)) {
+                    String j = (String) params.get("j");
+                    String k = (String) params.get("k");
+                    String l = (String) params.get("l");
+                    HttpClient httpClient = HttpClient.newHttpClient();
+                    
+                    CompletableFuture<Void> future = orderAPI.addOrder(j, k, l, httpClient);
+                    future.get(); // Wait for completion
+                    return true;
+                }
+            }
+        } catch (Exception e) {
+            log.error("Retry failed for operation: {}", message.getOperationId(), e);
+            return false;
+        }
+        
+        log.warn("Unknown operation type: {}.{}", apiName, operationType);
+        return false;
+    }
+}
+
+/**
+ * AWS SQS Configuration
+ */
+@Configuration
+public class AwsConfig {
+    
+    @Value("${aws.region}")
+    private String region;
+    
+    @Value("${aws.accessKey}")
+    private String accessKey;
+    
+    @Value("${aws.secretKey}")
+    private String secretKey;
+    
+    @Bean
+    public AmazonSQS sqsClient() {
+        BasicAWSCredentials credentials = new BasicAWSCredentials(accessKey, secretKey);
+        return AmazonSQSClientBuilder.standard()
+                .withCredentials(new AWSStaticCredentialsProvider(credentials))
+                .withRegion(region)
+                .build();
+    }
+}
+
+/**
+ * Application properties file
+ */
+// application.properties
+// api.retry.maxAttempts=5
+// api.retry.initialBackoffMs=1000
+// api.retry.maxBackoffMs=30000
+// api.retry.multiplier=2
+// 
+// aws.region=us-east-1
+// aws.accessKey=your-access-key
+// aws.secretKey=your-secret-key
+// aws.sqs.queue.url=https://sqs.us-east-1.amazonaws.com/123456789012/failed-operations-queue
+// 
+// scheduler.retry.enabled=true
+// scheduler.retry.intervalMs=60000
