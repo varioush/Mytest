@@ -17,7 +17,7 @@ public class ProxyController {
 
     // List of known path prefixes
     private static final List<String> PATH_PREFIXES = new ArrayList<String>() {{
-        add("/dashboard");
+        add("/proxy");
         add("/api");
         // You can add more paths like "/admin", "/service", etc.
     }};
