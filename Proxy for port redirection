@@ -7,24 +7,45 @@ import java.io.IOException;
 import java.util.Collections;
 import java.util.Enumeration;
 import java.util.List;
-import java.util.stream.Collectors;
+import java.util.ArrayList;
 
 @RestController
-@RequestMapping("/dashboard")
-public class JobRunrDashboardProxyController {
+public class JobRunrProxyController {
 
     private final RestTemplate restTemplate = new RestTemplate();
     private static final String TARGET_BASE_URL = "http://localhost:9877";
 
-    @RequestMapping("/**")
-    public ResponseEntity<byte[]> proxyDashboard(HttpServletRequest request, @RequestBody(required = false) byte[] body) throws IOException {
-        try {
-            // 1. Build target URL
-            String path = request.getRequestURI().substring("/dashboard".length());
-            String queryString = request.getQueryString();
-            String targetUrl = TARGET_BASE_URL + path + (queryString != null ? "?" + queryString : "");
+    // List of known path prefixes
+    private static final List<String> PATH_PREFIXES = new ArrayList<String>() {{
+        add("/dashboard");
+        add("/api");
+        // You can add more paths like "/admin", "/service", etc.
+    }};
 
-            // 2. Copy headers from incoming request
+    // Route all requests that start with /dashboard or /api to proxy logic
+    @RequestMapping("/dashboard/**")
+    public ResponseEntity<byte[]> proxyDashboard(HttpServletRequest request,
+                                                 @RequestBody(required = false) byte[] body) throws IOException {
+        return proxyRequest(request, body, "/dashboard");
+    }
+
+    @RequestMapping("/api/**")
+    public ResponseEntity<byte[]> proxyApi(HttpServletRequest request,
+                                           @RequestBody(required = false) byte[] body) throws IOException {
+        return proxyRequest(request, body, "/api");
+    }
+
+    // This handles the logic for proxying to the JobRunr server
+    private ResponseEntity<byte[]> proxyRequest(HttpServletRequest request, byte[] body, String pathPrefix) throws IOException {
+        try {
+            String uri = request.getRequestURI();
+            String strippedPath = uri.substring(pathPrefix.length());
+
+            // Reconstruct full target URL
+            String queryString = request.getQueryString();
+            String targetUrl = TARGET_BASE_URL + strippedPath + (queryString != null ? "?" + queryString : "");
+
+            // Copy all headers from incoming request
             HttpHeaders headers = new HttpHeaders();
             Enumeration<String> headerNames = request.getHeaderNames();
             while (headerNames.hasMoreElements()) {
@@ -32,12 +53,12 @@ public class JobRunrDashboardProxyController {
                 List<String> headerValues = Collections.list(request.getHeaders(headerName));
                 headers.put(headerName, headerValues);
             }
-            headers.remove(HttpHeaders.HOST); // Host header should not be forwarded
+            headers.remove(HttpHeaders.HOST);  // Don't forward Host header
 
-            // 3. Build HTTP entity with headers and body
+            // Create HTTP Entity
             HttpEntity<byte[]> httpEntity = new HttpEntity<>(body, headers);
 
-            // 4. Forward the request using RestTemplate
+            // Forward the request to the target server
             ResponseEntity<byte[]> response = restTemplate.exchange(
                     targetUrl,
                     HttpMethod.valueOf(request.getMethod()),
@@ -45,7 +66,6 @@ public class JobRunrDashboardProxyController {
                     byte[].class
             );
 
-            // 5. Return response back to client
             return ResponseEntity
                     .status(response.getStatusCode())
                     .headers(response.getHeaders())
@@ -56,4 +76,6 @@ public class JobRunrDashboardProxyController {
                     .body(("Failed to proxy to JobRunr server: " + e.getMessage()).getBytes());
         }
     }
+    
+    // You can also define other routes like /admin/** if needed.
 }
