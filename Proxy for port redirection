@@ -1,0 +1,59 @@
+import org.springframework.http.*;
+import org.springframework.web.bind.annotation.*;
+import org.springframework.web.client.RestTemplate;
+
+import javax.servlet.http.HttpServletRequest;
+import java.io.IOException;
+import java.util.Collections;
+import java.util.Enumeration;
+import java.util.List;
+import java.util.stream.Collectors;
+
+@RestController
+@RequestMapping("/dashboard")
+public class JobRunrDashboardProxyController {
+
+    private final RestTemplate restTemplate = new RestTemplate();
+    private static final String TARGET_BASE_URL = "http://localhost:9877";
+
+    @RequestMapping("/**")
+    public ResponseEntity<byte[]> proxyDashboard(HttpServletRequest request, @RequestBody(required = false) byte[] body) throws IOException {
+        try {
+            // 1. Build target URL
+            String path = request.getRequestURI().substring("/dashboard".length());
+            String queryString = request.getQueryString();
+            String targetUrl = TARGET_BASE_URL + path + (queryString != null ? "?" + queryString : "");
+
+            // 2. Copy headers from incoming request
+            HttpHeaders headers = new HttpHeaders();
+            Enumeration<String> headerNames = request.getHeaderNames();
+            while (headerNames.hasMoreElements()) {
+                String headerName = headerNames.nextElement();
+                List<String> headerValues = Collections.list(request.getHeaders(headerName));
+                headers.put(headerName, headerValues);
+            }
+            headers.remove(HttpHeaders.HOST); // Host header should not be forwarded
+
+            // 3. Build HTTP entity with headers and body
+            HttpEntity<byte[]> httpEntity = new HttpEntity<>(body, headers);
+
+            // 4. Forward the request using RestTemplate
+            ResponseEntity<byte[]> response = restTemplate.exchange(
+                    targetUrl,
+                    HttpMethod.valueOf(request.getMethod()),
+                    httpEntity,
+                    byte[].class
+            );
+
+            // 5. Return response back to client
+            return ResponseEntity
+                    .status(response.getStatusCode())
+                    .headers(response.getHeaders())
+                    .body(response.getBody());
+
+        } catch (Exception e) {
+            return ResponseEntity.status(HttpStatus.BAD_GATEWAY)
+                    .body(("Failed to proxy to JobRunr server: " + e.getMessage()).getBytes());
+        }
+    }
+}
