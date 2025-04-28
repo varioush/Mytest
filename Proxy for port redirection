@@ -10,10 +10,10 @@ import java.util.List;
 import java.util.ArrayList;
 
 @RestController
-public class JobRunrProxyController {
+public class ProxyController {
 
     private final RestTemplate restTemplate = new RestTemplate();
-    private static final String TARGET_BASE_URL = "http://localhost:9877";
+    private static final String TARGET_BASE_URL = "http://localhost:4043";
 
     // List of known path prefixes
     private static final List<String> PATH_PREFIXES = new ArrayList<String>() {{
@@ -23,7 +23,7 @@ public class JobRunrProxyController {
     }};
 
     // Route all requests that start with /dashboard or /api to proxy logic
-    @RequestMapping("/dashboard/**")
+    @RequestMapping("/proxy/**")
     public ResponseEntity<byte[]> proxyDashboard(HttpServletRequest request,
                                                  @RequestBody(required = false) byte[] body) throws IOException {
         return proxyRequest(request, body, "/dashboard");
