@@ -35,7 +35,7 @@ public class ProxyController {
         return proxyRequest(request, body, "/api");
     }
 
-    // This handles the logic for proxying to the JobRunr server
+    // This handles the logic for proxying to the Proxy server
     private ResponseEntity<byte[]> proxyRequest(HttpServletRequest request, byte[] body, String pathPrefix) throws IOException {
         try {
             String uri = request.getRequestURI();
@@ -73,7 +73,7 @@ public class ProxyController {
 
         } catch (Exception e) {
             return ResponseEntity.status(HttpStatus.BAD_GATEWAY)
-                    .body(("Failed to proxy to JobRunr server: " + e.getMessage()).getBytes());
+                    .body(("Failed to proxy to Proxy server: " + e.getMessage()).getBytes());
         }
     }
     
