@@ -1,0 +1,49 @@
+Functional Requirements
+1. Task Ingestion
+Incoming tasks must be evaluated for previous failures for the same user and target.
+
+If any pending/failed task for the target exists, the new task is dumped into DynamoDB rather than executed.
+
+2. Task Execution Engine
+Tasks are executed sequentially for each user per target.
+
+Each target has its own queue and retry loop, independent of others.
+
+Tasks are processed in FIFO order per user.
+
+3. Failure Handling
+Failed tasks after 3 attempts (Resilience4j default) are persisted in DynamoDB.
+
+No duplicate processing. Once a task is processed successfully, it must be deleted or marked stale.
+
+4. Retry Logic
+Retried with exponential backoff using Resilience4j.
+
+If the target is down, no new requests or retries are triggered for that target.
+
+Retry job for each target is continuously polling and checking readiness.
+
+5. Recovery Handling
+If the target comes back online, the system picks the oldest 10 users with pending tasks for that target and processes them.
+
+Each user’s tasks are processed in order before moving to the next batch.
+
+6. Post-processing
+Post-operations are performed after task success.
+
+Post-processing failures are retried with backoff.
+
+Task is only removed from the queue if both task and post-processing succeed.
+
+Acceptance Criteria & Test Cases
+ID	Test Scenario	Given	When	Then
+TC01	Task Ingestion skips execution if target has failures	User has a failed A2 task in DynamoDB	A3 arrives	A3 is saved to DynamoDB instead of executed
+TC02	Tasks are executed in FIFO	User has [A1, A2, A3] for target A	A is up	Tasks are processed in the order A1 → A2 → A3
+TC03	Independent retry queue per target	Target B is down, target A is up	Retry job runs	A tasks are retried; B tasks are held
+TC04	Target recovery resumes processing	B was down, then comes back up	Retry job detects B is healthy	Process oldest 10 users with B tasks
+TC05	Tasks are deleted after success	A task A2 is successful	Post-processing is also successful	A2 is deleted from queue
+TC06	Post-processing failure triggers retry	A task A1 success, post-op fails	Retry job runs	Post-op is retried with backoff
+TC07	Post-processing success completes task	Post-op retry succeeds	Next retry cycle	Task is removed from queue
+TC08	Target down halts all its tasks	A is marked down	Retry job runs	All A-related tasks are held
+TC09	Duplicate task is not executed again	A2 exists and is done	Same A2 is received	Task is ignored or marked stale
+TC10	Mixed tasks from different targets	A, B, C queues have tasks	B comes online	Only B tasks are resumed
