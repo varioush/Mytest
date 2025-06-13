@@ -1,0 +1,57 @@
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.scheduling.annotation.EnableAsync;
+
+import java.util.concurrent.*;
+import java.util.logging.Logger;
+
+@Configuration
+@EnableAsync
+public class AsyncExecutorConfig {
+
+    private static final Logger LOGGER = Logger.getLogger(AsyncExecutorConfig.class.getName());
+
+    @Bean(name = "asyncExecutor")
+    public Executor asyncExecutor() {
+        int corePoolSize = 100;      // always-available threads
+        int maxPoolSize = 200;       // can scale during burst
+        int queueCapacity = 5000;    // prevents data loss during spikes
+        long keepAliveSeconds = 300; // keep extra threads alive for 5 mins
+
+        BlockingQueue<Runnable> queue = new LinkedBlockingQueue<>(queueCapacity);
+
+        ThreadFactory threadFactory = new ThreadFactory() {
+            private final ThreadFactory delegate = Executors.defaultThreadFactory();
+            private int count = 1;
+
+            @Override
+            public Thread newThread(Runnable r) {
+                Thread t = delegate.newThread(r);
+                t.setName("async-executor-" + count++);
+                t.setDaemon(false);
+                return t;
+            }
+        };
+
+        RejectedExecutionHandler rejectionHandler = (runnable, executor) -> {
+            LOGGER.severe("🚨 Task rejected! Pool exhausted. Active threads: "
+                    + executor.getActiveCount() + ", Queue size: " + executor.getQueue().size());
+
+            // Optional: fallback to SQS, Kafka, DB, or local retry queue
+        };
+
+        ThreadPoolExecutor executor = new ThreadPoolExecutor(
+                corePoolSize,
+                maxPoolSize,
+                keepAliveSeconds,
+                TimeUnit.SECONDS,
+                queue,
+                threadFactory,
+                rejectionHandler
+        );
+
+        executor.allowCoreThreadTimeOut(false); // keep core threads alive
+
+        return executor;
+    }
+}
