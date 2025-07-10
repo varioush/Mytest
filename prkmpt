@@ -1,0 +1,2 @@
+I have an existing void method in a Spring Boot service. I want to use Resilience4j @Retry to retry the method up to 3 times only when a custom checked exception (e.g., SomeCustomException) is thrown. If all retries fail, I want to enter a fallback method that throws a RuntimeException. The fallback must match the original method signature and accept the exception. Please show how to annotate the method and define the fallback, assuming the method logic should remain unchanged.
+
