@@ -1,0 +1,140 @@
+package com.example.client;
+
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.http.HttpMethod;
+import org.springframework.http.MediaType;
+import org.springframework.http.client.HttpComponentsClientHttpRequestFactory;
+import org.springframework.http.client.MultipartBodyBuilder;
+import org.springframework.http.HttpStatusCode;
+import org.springframework.stereotype.Service;
+import org.springframework.util.LinkedMultiValueMap;
+import org.springframework.util.MultiValueMap;
+import org.springframework.web.client.*;
+
+import java.net.URI;
+import java.util.Map;
+
+import org.springframework.web.client.RestClient;
+import org.springframework.web.util.UriComponentsBuilder;
+
+@Slf4j
+@Service
+public class RestClientService {
+
+    private final RestClient restClient;
+
+    public RestClientService() {
+        this.restClient = RestClient.builder()
+                .requestFactory(this::requestFactoryWithTimeouts)
+                .build();
+    }
+
+    private HttpComponentsClientHttpRequestFactory requestFactoryWithTimeouts() {
+        var factory = new HttpComponentsClientHttpRequestFactory();
+        factory.setConnectTimeout(10_000); // 10s
+        factory.setReadTimeout(15_000);    // 15s
+        return factory;
+    }
+
+    public <T> T sendRequest(
+            String baseUrl,
+            String path,
+            HttpMethod method,
+            Map<String, String> queryParams,
+            Map<String, String> headers,
+            Object body,
+            Class<T> responseType
+    ) {
+        URI uri = UriComponentsBuilder.fromHttpUrl(baseUrl)
+                .path(path)
+                .queryParams(toMultiValueMap(queryParams))
+                .build()
+                .toUri();
+
+        try {
+            var request = restClient.method(method)
+                    .uri(uri)
+                    .headers(httpHeaders -> {
+                        if (headers != null) {
+                            headers.forEach(httpHeaders::add);
+                        }
+                    });
+
+            if (body != null) {
+                log.info("→ [{}] {} with body: {}", method, uri, body);
+                return request
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .body(body)
+                        .retrieve()
+                        .onStatus(HttpStatusCode::isError, (req, res) -> throwFromStatus(res))
+                        .body(responseType);
+            } else {
+                log.info("→ [{}] {} with no body", method, uri);
+                return request
+                        .retrieve()
+                        .onStatus(HttpStatusCode::isError, (req, res) -> throwFromStatus(res))
+                        .body(responseType);
+            }
+
+        } catch (RestClientResponseException ex) {
+            log.error("⛔ HTTP {} {}: {}", ex.getRawStatusCode(), uri, ex.getResponseBodyAsString(), ex);
+            throw ex;
+        } catch (RestClientException ex) {
+            log.error("⛔ Request failed to {}: {}", uri, ex.getMessage(), ex);
+            throw ex;
+        } catch (Exception ex) {
+            log.error("⛔ Unexpected error calling {}: {}", uri, ex.getMessage(), ex);
+            throw new RuntimeException("Unexpected error calling external service", ex);
+        }
+    }
+
+    public <T> T sendMultipartRequest(
+            String url,
+            Map<String, String> formFields,
+            Map<String, byte[]> files,
+            Class<T> responseType
+    ) {
+        try {
+            var builder = new MultipartBodyBuilder();
+            formFields.forEach(builder::part);
+            files.forEach((name, data) -> builder.part(name, data)
+                    .header("Content-Disposition", "form-data; name=\"" + name + "\"; filename=\"" + name + "\""));
+
+            log.info("→ [POST multipart] {}", url);
+
+            return restClient.post()
+                    .uri(url)
+                    .contentType(MediaType.MULTIPART_FORM_DATA)
+                    .body(builder.build())
+                    .retrieve()
+                    .onStatus(HttpStatusCode::isError, (req, res) -> throwFromStatus(res))
+                    .body(responseType);
+
+        } catch (RestClientResponseException ex) {
+            log.error("⛔ Multipart POST to {} failed: {}", url, ex.getResponseBodyAsString(), ex);
+            throw ex;
+        } catch (Exception ex) {
+            log.error("⛔ Multipart error to {}: {}", url, ex.getMessage(), ex);
+            throw new RuntimeException("Unexpected multipart error", ex);
+        }
+    }
+
+    private void throwFromStatus(ClientResponse res) throws Exception {
+        var status = res.getRawStatusCode();
+        var bodyBytes = res.getBody().readAllBytes();
+        throw new RestClientResponseException(
+                "Error response",
+                status,
+                res.getStatusText(),
+                res.getHeaders(),
+                bodyBytes,
+                null
+        );
+    }
+
+    private MultiValueMap<String, String> toMultiValueMap(Map<String, String> map) {
+        var multiMap = new LinkedMultiValueMap<String, String>();
+        if (map != null) map.forEach(multiMap::add);
+        return multiMap;
+    }
+}
