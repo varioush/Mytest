@@ -1,0 +1,38 @@
+<!-- Dev -->
+<plugin>
+    <groupId>org.springdoc</groupId>
+    <artifactId>springdoc-openapi-maven-plugin</artifactId>
+    <version>1.9.0</version>
+    <configuration>
+        <apiDocsUrl>http://localhost:8080/v3/api-docs.yaml</apiDocsUrl>
+        <outputFileName>openapi-dev.yaml</outputFileName>
+        <outputDir>${project.build.directory}</outputDir>
+        <outputFileType>YAML</outputFileType>
+    </configuration>
+</plugin>
+
+<!-- QA -->
+<plugin>
+    <groupId>org.springdoc</groupId>
+    <artifactId>springdoc-openapi-maven-plugin</artifactId>
+    <version>1.9.0</version>
+    <configuration>
+        <apiDocsUrl>https://qa.mycompany.com/v3/api-docs.yaml</apiDocsUrl>
+        <outputFileName>openapi-qa.yaml</outputFileName>
+        <outputDir>${project.build.directory}</outputDir>
+        <outputFileType>YAML</outputFileType>
+    </configuration>
+</plugin>
+
+<!-- Prod -->
+<plugin>
+    <groupId>org.springdoc</groupId>
+    <artifactId>springdoc-openapi-maven-plugin</artifactId>
+    <version>1.9.0</version>
+    <configuration>
+        <apiDocsUrl>https://api.mycompany.com/v3/api-docs.yaml</apiDocsUrl>
+        <outputFileName>openapi-prod.yaml</outputFileName>
+        <outputDir>${project.build.directory}</outputDir>
+        <outputFileType>YAML</outputFileType>
+    </configuration>
+</plugin>
