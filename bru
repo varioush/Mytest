@@ -1,0 +1,118 @@
+import json
+import re
+from pathlib import Path
+from typing import Dict, Any
+
+def replace_body_json_in_bru(bru_content: str, new_json_dict: Dict[str, Any]) -> str:
+    """
+    Replace the content inside the 'body:json' block of a .bru file with new JSON.
+
+    Args:
+        bru_content: The content of the .bru file as a string.
+        new_json_dict: The new JSON data as a Python dict.
+
+    Returns:
+        Updated .bru file content as a string.
+
+    Raises:
+        ValueError: If 'body:json' block is not found.
+    """
+    # Regex to match 'body:json { ... }' block, capturing the JSON inside
+    # Matches: body:json, optional whitespace, '{', content until matching '}', optional whitespace
+    pattern = r'(body:json\s*\{)(.*?)\}(\s*?)(?=\n[^{}]*?(\n|$))'
+    match = re.search(pattern, bru_content, re.DOTALL)
+
+    if not match:
+        raise ValueError("No 'body:json' block found in the .bru file.")
+
+    # Extract parts: prefix (before block), block start, old JSON, block end, suffix
+    prefix = bru_content[:match.start()]
+    block_start = match.group(1)
+    old_json = match.group(2).strip()
+    block_end = match.group(3)
+    suffix = bru_content[match.end():]
+
+    # Serialize new dict to JSON string, pretty-printed with 2 spaces
+    new_json_str = json.dumps(new_json_dict, indent=2)
+
+    # Reconstruct the file content with new JSON
+    updated_content = f"{prefix}{block_start}\n{new_json_str}\n{block_end}{suffix}"
+    return updated_content
+
+def process_bru_files(bru_dir: str, json_dir: str) -> None:
+    """
+    Process all .bru files in a directory, replacing their 'body:json' content
+    with data from corresponding .json files in another directory.
+
+    Args:
+        bru_dir: Directory containing .bru files.
+        json_dir: Directory containing .json files with matching names.
+
+    Raises:
+        ValueError: If directories don't exist or files can't be processed.
+    """
+    # Convert input paths to Path objects
+    bru_dir_path = Path(bru_dir)
+    json_dir_path = Path(json_dir)
+
+    # Validate directories exist
+    if not bru_dir_path.is_dir():
+        raise ValueError(f"Bru directory not found: {bru_dir}")
+    if not json_dir_path.is_dir():
+        raise ValueError(f"JSON directory not found: {json_dir}")
+
+    # Iterate over all .bru files in the bru directory
+    for bru_file in bru_dir_path.glob("*.bru"):
+        # Get the base name (e.g., 'example' from 'example.bru')
+        base_name = bru_file.stem
+        # Construct corresponding JSON file path (e.g., 'json_dir/example.json')
+        json_file = json_dir_path / f"{base_name}.json"
+
+        # Check if corresponding JSON file exists
+        if not json_file.exists():
+            print(f"Warning: No matching JSON file found for {bru_file.name}")
+            continue
+
+        try:
+            # Read the .bru file content
+            with open(bru_file, 'r') as f:
+                bru_content = f.read()
+
+            # Read and parse the .json file content
+            with open(json_file, 'r') as f:
+                new_json_dict = json.load(f)
+
+            # Replace the body:json block with new JSON content
+            updated_content = replace_body_json_in_bru(bru_content, new_json_dict)
+
+            # Write the updated content back to the .bru file
+            with open(bru_file, 'w') as f:
+                f.write(updated_content)
+            print(f"Successfully updated {bru_file.name}")
+
+            # Optional: Write to a new directory instead (uncomment to use)
+            # output_dir = Path(bru_dir) / "output"
+            # output_dir.mkdir(exist_ok=True)
+            # output_file = output_dir / bru_file.name
+            # with open(output_file, 'w') as f:
+            #     f.write(updated_content)
+            # print(f"Successfully wrote updated {bru_file.name} to {output_file}")
+
+        except ValueError as e:
+            print(f"Error processing {bru_file.name}: {e}")
+        except json.JSONDecodeError:
+            print(f"Error: Invalid JSON in {json_file.name}")
+        except Exception as e:
+            print(f"Unexpected error processing {bru_file.name}: {e}")
+
+# Example usage
+if __name__ == "__main__":
+    # Define input directories
+    bru_directory = "./bru_files"  # Directory with .bru files
+    json_directory = "./json_files"  # Directory with .json files
+
+    try:
+        # Process all .bru files
+        process_bru_files(bru_directory, json_directory)
+    except ValueError as e:
+        print(f"Error: {e}")
